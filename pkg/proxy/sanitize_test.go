@@ -38,6 +38,31 @@ func TestSanitizeLogOutput(t *testing.T) {
 			input: `Bearer tok123 and dapi-xyz456`,
 			want:  `[REDACTED] and [REDACTED]`,
 		},
+		{
+			name:  "bearer header word itself is redacted",
+			input: `Bearer mysecrettoken`,
+			want:  `[REDACTED]`,
+		},
+		{
+			name:  "dapi token without leading hyphen",
+			input: `token was dapi01234567890abcdef in the request`,
+			want:  `token was [REDACTED] in the request`,
+		},
+		{
+			name:  "dapi token with internal hyphens",
+			input: `token was dapi-abc-123-xyz in the request`,
+			want:  `token was [REDACTED] in the request`,
+		},
+		{
+			name:  "x-databricks-authorization header",
+			input: `X-Databricks-Authorization: dapi01234567890abcdef`,
+			want:  `[REDACTED]`,
+		},
+		{
+			name:  "x-databricks-authorization header lowercase",
+			input: `x-databricks-authorization: some-pat-token`,
+			want:  `[REDACTED]`,
+		},
 	}
 
 	for _, tt := range tests {
