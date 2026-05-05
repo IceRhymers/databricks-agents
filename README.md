@@ -302,7 +302,7 @@ databricks-claude --headless
 
 `databricks-claude` wraps the `claude` binary. It:
 
-1. Binds a local HTTP proxy on `127.0.0.1:49153` (fixed port — shared across concurrent sessions)
+1. Binds a local HTTP proxy on a configured port (default `49153`, stored in `~/.claude/.databricks-claude.json`)
 2. Writes `~/.claude/settings.json` once to point `ANTHROPIC_BASE_URL` at the proxy (idempotent — no restore on exit)
 3. Launches `claude` with your args — fully transparent
 4. Injects fresh Databricks OAuth tokens on every request (auto-refreshed from `databricks auth token`)
@@ -346,10 +346,7 @@ Unity Catalog table schemas (Delta Lake DDL) for all three OTel signals are in [
 On first run (when `ANTHROPIC_BASE_URL` is not set), `databricks-claude` auto-discovers:
 
 - Your workspace host from `databricks auth env`
-- Your workspace ID via the SCIM API (`x-databricks-org-id` header)
-- Constructs the AI Gateway URL: `https://<workspace-id>.ai-gateway.cloud.databricks.com/anthropic`
-
-If workspace ID resolution fails, it falls back to `<host>/serving-endpoints/anthropic`.
+- Constructs the AI Gateway URL: `<host>/ai-gateway/anthropic`
 
 ### Profile Resolution Order
 
@@ -392,9 +389,8 @@ Example output:
 databricks-claude configuration:
   Profile:              DEFAULT
   DATABRICKS_HOST:      https://adb-1234567890123456.7.azuredatabricks.net
-  ANTHROPIC_BASE_URL:   https://1234567890123456.ai-gateway.cloud.databricks.com/anthropic
+  ANTHROPIC_BASE_URL:   https://adb-1234567890123456.7.azuredatabricks.net/ai-gateway/anthropic
   ANTHROPIC_AUTH_TOKEN: dapi-***
-  ANTHROPIC_MODEL: databricks-claude-opus-4-7
   Upstream binary:      /usr/local/bin/claude
   OTEL enabled:         false
 ```

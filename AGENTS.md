@@ -11,19 +11,22 @@ Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth t
 |------|-------------|
 | `main.go` | CLI entry point: flag parsing, config resolution from `~/.claude/settings.json` and persistent config, token seeding, AI Gateway discovery, proxy startup, settings patching, child launch, and settings restore on exit |
 | `proxy.go` | Thin facade over `pkg/proxy`: defines `ProxyConfig`, wires up `NewProxyServer` and `StartProxy` |
-| `token.go` | Facade over `pkg/tokencache`: implements `databricksFetcher` (shells out to `databricks auth token`), host discovery via `databricks auth env`, workspace ID resolution via SCIM, and AI Gateway URL construction |
-| `process.go` | `SettingsManager` (wraps `pkg/settings`): full-setup and save/restore of `~/.claude/settings.json` env keys, OTEL key management, `ClearOTELKeys`, `RunChild`, `ForwardSignals` |
-| `lock.go` | Type alias forwarding `pkg/filelock.FileLock` to package main |
-| `registry.go` | Type alias forwarding `pkg/registry.SessionRegistry` to package main |
-| `desktop_config.go` | `desktop` subcommand handlers: credential-helper alias, `generate-config` (writes `.mobileconfig`, `.reg`, and `.json` artifacts for Claude Desktop), atomic file writes, output safety guard, per-OS install instructions |
+| `token.go` | Facade over `pkg/tokencache`: implements `databricksFetcher` (shells out to `databricks auth token`), host discovery via `databricks auth env`, and AI Gateway URL construction (`{host}/ai-gateway/anthropic`) |
+| `process.go` | Wraps `pkg/childproc`: `RunChild`, `ForwardSignals` |
+| `state.go` | `persistentState` struct and helpers for `~/.claude/.databricks-claude.json` (profile, port, CLI path, OTEL table names) |
+| `hooks.go` | Session hook install/uninstall: `installHooks`, `uninstallHooks` |
+| `ensureconfig.go` | Bootstrap helpers for first-run settings patching |
+| `completion_flags.go` | `flagDefs` slice shared by shell completion and flag parsing |
+| `databrickscfg.go` | Reads `~/.databrickscfg` section headers for profile completion |
+| `desktop_config.go` | `desktop` subcommand: `generate-config` writing `.mobileconfig`, `.reg`, and `.json` artifacts for Claude Desktop; credential-helper alias dispatch |
+| `desktop_trust.go` | `generate-trust-profile` subcommand for MDM trust profile generation |
 | `desktop_config_test.go` | Tests for `buildMobileconfig`, `buildRegFile`, `buildDevModeJSON`, `writeDesktopConfigByPath`, `guardDevJSONOutputPath`, `writeFileAtomic`, install-instruction routing, and model-list consistency across all three artifacts |
 | `main_test.go` | Tests for `parseArgs`, `handlePrintEnv`, persistent config, `deriveLogsTable`, full integration scenarios |
-| `process_test.go` | Tests for `SettingsManager` save/restore, atomic writes, OTEL handling, signal forwarding, exit code propagation |
+| `process_test.go` | Tests for `RunChild`, signal forwarding, exit code propagation |
 | `proxy_test.go` | Tests for inference and OTEL proxy routing, token injection, panic recovery |
 | `token_test.go` | Tests using helper binaries compiled at test time to mock the `databricks` CLI |
-| `lock_test.go` | Tests for `FileLock` acquire/release and contention |
-| `registry_test.go` | Tests for session registry register/unregister/prune |
-| `concurrent_test.go` | Concurrent session lifecycle and handoff tests |
+| `state_test.go` | Tests for persistent state load/save |
+| `hooks_test.go` | Tests for hook install/uninstall |
 | `Makefile` | Build, install, test, cross-compile, lint targets |
 | `go.mod` | Module declaration (`github.com/IceRhymers/databricks-claude`, Go 1.22, zero deps) |
 | `CLAUDE.md` | Project-level AI agent instructions |
