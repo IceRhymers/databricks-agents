@@ -12,11 +12,16 @@ Reusable library packages extracted from the root `main` package. Each sub-packa
 |-----------|---------|
 | `authcheck/` | Pre-flight Databricks authentication verification and interactive login (see `authcheck/AGENTS.md`) |
 | `childproc/` | Child process lifecycle: start, signal forwarding, exit code propagation (see `childproc/AGENTS.md`) |
-| `filelock/` | File-based exclusive locking via `syscall.Flock` (see `filelock/AGENTS.md`) |
+| `completion/` | Shell completion script generation (bash, zsh, fish) from `FlagDef` slices |
+| `headless/` | Headless mode helpers: `Ensure` (start-if-absent) and `Release` (refcount decrement) |
+| `health/` | `/health` endpoint handler returning JSON liveness data |
+| `lifecycle/` | HTTP handler wrapper adding `/shutdown` and idle timeout |
+| `portbind/` | Port binding helpers with configured-port support |
 | `proxy/` | HTTP/WebSocket reverse proxy, security checks, log sanitization (see `proxy/AGENTS.md`) |
-| `registry/` | JSON-file-backed session registry for multi-process coordination (see `registry/AGENTS.md`) |
-| `settings/` | Generic settings.json read/write/restore engine with session-aware handoff (see `settings/AGENTS.md`) |
+| `refcount/` | Atomic session reference counter |
+| `state/` | JSON-file state persistence helpers (atomic writes) |
 | `tokencache/` | Generic mutex-guarded token cache with configurable fetcher (see `tokencache/AGENTS.md`) |
+| `updater/` | GitHub release checker with 24-hour cache and numeric semver comparison |
 
 ## For AI Agents
 
@@ -27,7 +32,7 @@ Reusable library packages extracted from the root `main` package. Each sub-packa
 
 ### Testing Requirements
 - Each package has co-located `*_test.go` files. Run `go test ./pkg/...` to test all packages.
-- `proxy/` has the most extensive tests; `settings/` has no separate test file (tested via `process_test.go` in root).
+- `proxy/` has the most extensive tests.
 
 ### Common Patterns
 - Packages that do I/O use **atomic temp-file + rename** for safe writes.
