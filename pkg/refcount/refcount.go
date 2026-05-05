@@ -1,5 +1,4 @@
-// Package refcount provides cross-process session counting backed by a JSON file.
-// on Windows).
+// Package refcount provides cross-process session reference counting backed by a JSON file.
 package refcount
 
 import (

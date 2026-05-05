@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/IceRhymers/databricks-claude/pkg/headless"
@@ -145,8 +146,7 @@ func isDBXHookEntry(entry interface{}) bool {
 	for _, h := range inner {
 		hm, _ := h.(map[string]interface{})
 		if cmd, _ := hm["command"].(string); len(cmd) > 0 {
-			if len(cmd) >= len("databricks-claude --headless") &&
-				cmd[:len("databricks-claude --headless")] == "databricks-claude --headless" {
+			if strings.HasPrefix(cmd, "databricks-claude --headless") {
 				return true
 			}
 		}

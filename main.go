@@ -292,8 +292,7 @@ func main() {
 		inferenceUpstream = v
 	}
 	// If it's already localhost (stale crash), treat as absent.
-	if inferenceUpstream != "" && len(inferenceUpstream) >= 16 &&
-		inferenceUpstream[:16] == "http://127.0.0.1" {
+	if strings.HasPrefix(inferenceUpstream, "http://127.0.0.1") || strings.HasPrefix(inferenceUpstream, "https://127.0.0.1") {
 		inferenceUpstream = ""
 	}
 	databricksHost := readDatabricksCfgHost(resolvedProfile)
