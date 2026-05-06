@@ -19,6 +19,11 @@ func resolveDatabricksCLI(cmdName string) string {
 	return cli.ResolveDatabricksCLI(cmdName)
 }
 
+// isExecutableFile delegates to pkg/cli.IsExecutableFile.
+func isExecutableFile(path string) bool {
+	return cli.IsExecutableFile(path)
+}
+
 // TokenProvider is an alias to the pkg type for backward compatibility.
 type TokenProvider = tokencache.TokenProvider
 
