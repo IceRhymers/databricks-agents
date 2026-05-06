@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -110,12 +111,12 @@ func TestClearOTELKeysSubset(t *testing.T) {
 	initial := map[string]interface{}{
 		"env": map[string]interface{}{
 			// OTEL metrics keys (should be removed).
-			"OTEL_METRICS_EXPORTER":                  "otlp",
-			"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT":    "http://127.0.0.1:49153/otel",
-			"OTEL_EXPORTER_OTLP_METRICS_HEADERS":     "Authorization=Bearer token",
-			"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL":    "http/protobuf",
-			"OTEL_METRIC_EXPORT_INTERVAL":             "60000",
-			"CLAUDE_OTEL_UC_METRICS_TABLE":            "catalog.schema.metrics",
+			"OTEL_METRICS_EXPORTER":               "otlp",
+			"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://127.0.0.1:49153/otel",
+			"OTEL_EXPORTER_OTLP_METRICS_HEADERS":  "Authorization=Bearer token",
+			"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/protobuf",
+			"OTEL_METRIC_EXPORT_INTERVAL":          "60000",
+			"CLAUDE_OTEL_UC_METRICS_TABLE":         "catalog.schema.metrics",
 			// Unrelated keys (must survive).
 			"ANTHROPIC_BASE_URL":   "http://127.0.0.1:49153",
 			"ANTHROPIC_AUTH_TOKEN": "proxy-managed",
@@ -167,5 +168,150 @@ func TestClearOTELKeysSubset_MissingFile(t *testing.T) {
 	// File does not exist — must not error.
 	if err := clearOTELKeysSubset(settingsPath, otelMetricsKeys); err != nil {
 		t.Errorf("expected nil error for missing file, got: %v", err)
+	}
+}
+
+// TestWriteSettingsJSON_ConcurrentWrites verifies that two goroutines writing
+// to the same settings.json simultaneously produce a valid, uncorrupted JSON
+// file that matches exactly one of the two payloads.
+func TestWriteSettingsJSON_ConcurrentWrites(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+
+	payload1 := map[string]interface{}{
+		"env": map[string]interface{}{
+			"ANTHROPIC_BASE_URL": "http://127.0.0.1:49153",
+		},
+	}
+	payload2 := map[string]interface{}{
+		"env": map[string]interface{}{
+			"ANTHROPIC_BASE_URL": "http://127.0.0.1:49154",
+		},
+	}
+
+	var wg sync.WaitGroup
+	var err1, err2 error
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		err1 = writeSettingsJSON(settingsPath, payload1)
+	}()
+	go func() {
+		defer wg.Done()
+		err2 = writeSettingsJSON(settingsPath, payload2)
+	}()
+	wg.Wait()
+
+	if err1 != nil {
+		t.Errorf("goroutine 1 writeSettingsJSON error: %v", err1)
+	}
+	if err2 != nil {
+		t.Errorf("goroutine 2 writeSettingsJSON error: %v", err2)
+	}
+
+	// The file must exist and contain valid JSON.
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings.json: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("settings.json is not valid JSON after concurrent writes: %v\ncontent: %s", err, data)
+	}
+
+	// The result must exactly match one of the two payloads.
+	env, _ := result["env"].(map[string]interface{})
+	if env == nil {
+		t.Fatal("settings.json missing 'env' block after concurrent writes")
+	}
+	url, _ := env["ANTHROPIC_BASE_URL"].(string)
+	if url != "http://127.0.0.1:49153" && url != "http://127.0.0.1:49154" {
+		t.Errorf("ANTHROPIC_BASE_URL is %q — not one of the two written values", url)
+	}
+
+	// No leftover temp files.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() != "settings.json" {
+			t.Errorf("unexpected leftover file in dir: %s", e.Name())
+		}
+	}
+}
+
+// TestWritePersistentConfig_ConcurrentWrites verifies that two goroutines
+// writing to the same persistent config file simultaneously produce a valid,
+// uncorrupted JSON file that matches exactly one of the two payloads.
+func TestWritePersistentConfig_ConcurrentWrites(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".databricks-claude.json")
+
+	payload1 := map[string]interface{}{
+		"port":    float64(49153),
+		"profile": "workspace-a",
+	}
+	payload2 := map[string]interface{}{
+		"port":    float64(49154),
+		"profile": "workspace-b",
+	}
+
+	var wg sync.WaitGroup
+	var err1, err2 error
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		err1 = writePersistentConfig(configPath, payload1)
+	}()
+	go func() {
+		defer wg.Done()
+		err2 = writePersistentConfig(configPath, payload2)
+	}()
+	wg.Wait()
+
+	if err1 != nil {
+		t.Errorf("goroutine 1 writePersistentConfig error: %v", err1)
+	}
+	if err2 != nil {
+		t.Errorf("goroutine 2 writePersistentConfig error: %v", err2)
+	}
+
+	// The file must exist and contain valid JSON.
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("config is not valid JSON after concurrent writes: %v\ncontent: %s", err, data)
+	}
+
+	// The result must exactly match one of the two payloads.
+	profile, _ := result["profile"].(string)
+	if profile != "workspace-a" && profile != "workspace-b" {
+		t.Errorf("profile is %q — not one of the two written values", profile)
+	}
+	port, _ := result["port"].(float64)
+	if port != 49153 && port != 49154 {
+		t.Errorf("port is %v — not one of the two written values", port)
+	}
+
+	// port and profile must be consistent (from the same write).
+	if (profile == "workspace-a" && port != 49153) || (profile == "workspace-b" && port != 49154) {
+		t.Errorf("port %v and profile %q are from different writes — file is corrupt", port, profile)
+	}
+
+	// No leftover temp files.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() != ".databricks-claude.json" {
+			t.Errorf("unexpected leftover file in dir: %s", e.Name())
+		}
 	}
 }
