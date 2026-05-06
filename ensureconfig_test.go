@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -312,6 +314,159 @@ func TestWritePersistentConfig_ConcurrentWrites(t *testing.T) {
 	for _, e := range entries {
 		if e.Name() != ".databricks-claude.json" {
 			t.Errorf("unexpected leftover file in dir: %s", e.Name())
+		}
+	}
+}
+
+// TestPruneStaleProxyEntries_DeadPort verifies that a stale ANTHROPIC_BASE_URL
+// pointing at a port that is no longer listening is removed by ensureConfig.
+func TestPruneStaleProxyEntries_DeadPort(t *testing.T) {
+	home := withTempHome(t)
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+
+	// Bind then immediately close a listener to obtain a dead port.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	deadPort := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	// Write settings.json with the stale URL.
+	initial := map[string]interface{}{
+		"env": map[string]interface{}{
+			"ANTHROPIC_BASE_URL":   fmt.Sprintf("http://127.0.0.1:%d", deadPort),
+			"ANTHROPIC_AUTH_TOKEN": "proxy-managed",
+		},
+	}
+	data, _ := json.MarshalIndent(initial, "", "  ")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, append(data, '\n'), 0o600); err != nil {
+		t.Fatalf("write initial settings.json: %v", err)
+	}
+
+	newURL := "http://127.0.0.1:49200"
+	if err := ensureConfig(newURL, nil); err != nil {
+		t.Fatalf("ensureConfig: %v", err)
+	}
+
+	doc, err := readSettingsJSON(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings.json: %v", err)
+	}
+	env, ok := doc["env"].(map[string]interface{})
+	if !ok {
+		t.Fatal("env block missing")
+	}
+	if got, _ := env["ANTHROPIC_BASE_URL"].(string); got != newURL {
+		t.Errorf("ANTHROPIC_BASE_URL: got %q, want %q", got, newURL)
+	}
+}
+
+// TestPruneStaleProxyEntries_LivePort verifies that an ANTHROPIC_BASE_URL
+// pointing at a still-listening port is preserved (idempotent case).
+func TestPruneStaleProxyEntries_LivePort(t *testing.T) {
+	home := withTempHome(t)
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+
+	// Bind a listener and keep it open.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	defer ln.Close()
+	livePort := ln.Addr().(*net.TCPAddr).Port
+	liveURL := fmt.Sprintf("http://127.0.0.1:%d", livePort)
+
+	// Write settings.json with the live URL.
+	initial := map[string]interface{}{
+		"env": map[string]interface{}{
+			"ANTHROPIC_BASE_URL":   liveURL,
+			"ANTHROPIC_AUTH_TOKEN": "proxy-managed",
+		},
+	}
+	data, _ := json.MarshalIndent(initial, "", "  ")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, append(data, '\n'), 0o600); err != nil {
+		t.Fatalf("write initial settings.json: %v", err)
+	}
+
+	// Call ensureConfig with the same URL — should be idempotent.
+	if err := ensureConfig(liveURL, nil); err != nil {
+		t.Fatalf("ensureConfig: %v", err)
+	}
+
+	doc, err := readSettingsJSON(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings.json: %v", err)
+	}
+	env, ok := doc["env"].(map[string]interface{})
+	if !ok {
+		t.Fatal("env block missing")
+	}
+	if got, _ := env["ANTHROPIC_BASE_URL"].(string); got != liveURL {
+		t.Errorf("ANTHROPIC_BASE_URL: got %q, want %q (live entry should be preserved)", got, liveURL)
+	}
+}
+
+// TestPruneStaleProxyEntries_OTELEndpoint verifies that a stale OTEL
+// *_ENDPOINT key pointing at a dead port is removed, while non-endpoint sibling
+// keys are left intact.
+func TestPruneStaleProxyEntries_OTELEndpoint(t *testing.T) {
+	home := withTempHome(t)
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+
+	// Bind then immediately close a listener to obtain a dead port.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	deadPort := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	// Write settings.json with a dead OTEL endpoint plus non-endpoint siblings.
+	initial := map[string]interface{}{
+		"env": map[string]interface{}{
+			"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": fmt.Sprintf("http://127.0.0.1:%d", deadPort),
+			"CLAUDE_OTEL_UC_METRICS_TABLE":         "catalog.schema.metrics",
+			"OTEL_METRICS_EXPORTER":                "otlp",
+			"OTEL_METRIC_EXPORT_INTERVAL":          "60000",
+		},
+	}
+	data, _ := json.MarshalIndent(initial, "", "  ")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, append(data, '\n'), 0o600); err != nil {
+		t.Fatalf("write initial settings.json: %v", err)
+	}
+
+	if err := ensureConfig("http://127.0.0.1:49200", nil); err != nil {
+		t.Fatalf("ensureConfig: %v", err)
+	}
+
+	doc, err := readSettingsJSON(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings.json: %v", err)
+	}
+	env, ok := doc["env"].(map[string]interface{})
+	if !ok {
+		t.Fatal("env block missing")
+	}
+
+	// Dead endpoint key must be gone.
+	if _, exists := env["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"]; exists {
+		t.Error("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT should have been removed (dead port)")
+	}
+
+	// Non-endpoint sibling keys must still be present.
+	for _, k := range []string{"CLAUDE_OTEL_UC_METRICS_TABLE", "OTEL_METRICS_EXPORTER", "OTEL_METRIC_EXPORT_INTERVAL"} {
+		if _, exists := env[k]; !exists {
+			t.Errorf("key %q should still be present but was removed", k)
 		}
 	}
 }

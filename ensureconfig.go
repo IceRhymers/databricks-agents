@@ -4,8 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 )
 
 // bootstrapSettings persists profile + port to the state file and writes the
@@ -71,6 +77,9 @@ func ensureConfig(proxyURL string, otelEnv map[string]string) error {
 
 	// Get or create the env block.
 	env := getOrCreateEnvBlock(doc)
+
+	// Remove stale 127.0.0.1:<port> entries from dead prior instances.
+	pruneStaleProxyEntries(env, portFromURL(proxyURL))
 
 	// Check if already configured — no-op if ANTHROPIC_BASE_URL matches and
 	// there are no pending OTEL keys to write.
@@ -162,6 +171,80 @@ func getOrCreateEnvBlock(doc map[string]interface{}) map[string]interface{} {
 	env := map[string]interface{}{}
 	doc["env"] = env
 	return env
+}
+
+// portFromURL parses rawURL and returns the port as an int. Returns 0 on any
+// error (missing port, non-numeric port, invalid URL).
+func portFromURL(rawURL string) int {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return 0
+	}
+	_, portStr, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		return 0
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return 0
+	}
+	return port
+}
+
+// pruneStaleProxyEntries removes any 127.0.0.1:<port> proxy entries from env
+// that belong to a prior instance that is no longer listening. skipPort is the
+// port we are about to write — it is always treated as live (idempotent case).
+func pruneStaleProxyEntries(env map[string]interface{}, skipPort int) {
+	// Probe ANTHROPIC_BASE_URL.
+	if baseURL, ok := env["ANTHROPIC_BASE_URL"].(string); ok {
+		u, err := url.Parse(baseURL)
+		if err == nil && u.Hostname() == "127.0.0.1" {
+			_, portStr, splitErr := net.SplitHostPort(u.Host)
+			if splitErr == nil {
+				port, convErr := strconv.Atoi(portStr)
+				if convErr == nil && port != skipPort {
+					conn, dialErr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
+					if dialErr != nil {
+						log.Printf("databricks-claude: removed stale proxy entry for port %d (prior instance not responding)", port)
+						delete(env, "ANTHROPIC_BASE_URL")
+						delete(env, "ANTHROPIC_AUTH_TOKEN")
+					} else {
+						conn.Close()
+					}
+				}
+			}
+		}
+	}
+
+	// Probe any OTEL endpoint keys containing _ENDPOINT with a 127.0.0.1 value.
+	for k, v := range env {
+		if !strings.Contains(k, "_ENDPOINT") {
+			continue
+		}
+		val, ok := v.(string)
+		if !ok {
+			continue
+		}
+		u, err := url.Parse(val)
+		if err != nil || u.Hostname() != "127.0.0.1" {
+			continue
+		}
+		_, portStr, splitErr := net.SplitHostPort(u.Host)
+		if splitErr != nil {
+			continue
+		}
+		port, convErr := strconv.Atoi(portStr)
+		if convErr != nil || port == skipPort {
+			continue
+		}
+		conn, dialErr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
+		if dialErr != nil {
+			log.Printf("databricks-claude: removed stale proxy entry for port %d (prior instance not responding)", port)
+			delete(env, k)
+		} else {
+			conn.Close()
+		}
+	}
 }
 
 // clearOTELKeys removes all OTEL-related env keys from ~/.claude/settings.json.
