@@ -13,6 +13,8 @@ type counter struct {
 	Count int `json:"count"`
 }
 
+// TODO: replace with a named Windows mutex (LockFileEx) for cross-process coordination.
+// The current sync.Mutex only synchronizes within a single process.
 var mu sync.Mutex
 
 func withLock(path string, fn func(*counter)) error {
