@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.16.1](https://github.com/IceRhymers/databricks-claude/compare/v0.16.0...v0.16.1) (2026-05-06)
+
+
+### Bug Fixes
+
+* add missing sanitize patterns and reject bare integers for --idle-timeout ([ec2e95b](https://github.com/IceRhymers/databricks-claude/commit/ec2e95be100985df4d1a01bfa7bde1752bf2e183))
+* broaden sanitize patterns to cover dapi tokens without hyphen and X-Databricks-Authorization ([7cccfd8](https://github.com/IceRhymers/databricks-claude/commit/7cccfd8f9d4a9d738d3b9e9bd7e3662c9ccecae1))
+* properly wrap lifecycle on health watcher takeover ([17fb740](https://github.com/IceRhymers/databricks-claude/commit/17fb740b2141aef664d04ca04838ec92e2d605fa))
+* remove stale proxy entries from settings.json on startup ([fd7fc35](https://github.com/IceRhymers/databricks-claude/commit/fd7fc3582db6f5cea133cf01649129b4a641fb02))
+* remove stale proxy entries from settings.json on startup ([8a1856b](https://github.com/IceRhymers/databricks-claude/commit/8a1856bdf2be3def5b2b4b40bc144f4f82ae49c5))
+* restore isExecutableFile shim in root package for desktop_config.go ([d1effbb](https://github.com/IceRhymers/databricks-claude/commit/d1effbb0e388b848579f3cf0a81456799bf402b1))
+* return errors from NewServer and Ensure instead of log.Fatalf; resolve CLI path in authcheck ([eeaa65e](https://github.com/IceRhymers/databricks-claude/commit/eeaa65ec3ce55b032ca9fd6e5643c13b9cf4cd6b))
+* skip Authorization header when token empty; fix WebSocket goroutine leak ([b3bf297](https://github.com/IceRhymers/databricks-claude/commit/b3bf2971d403f565194c1ae33c798362a5892657))
+* use os.CreateTemp for unique tmp filenames in settings writers ([a2d97a0](https://github.com/IceRhymers/databricks-claude/commit/a2d97a0b993f21b841346416acf7f2518b320c00))
+
 ## [0.16.0](https://github.com/IceRhymers/databricks-claude/compare/v0.15.0...v0.16.0) (2026-05-04)
 
 
