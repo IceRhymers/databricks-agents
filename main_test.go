@@ -189,6 +189,85 @@ func TestParseArgs_UnknownFlagPassthrough(t *testing.T) {
 	}
 }
 
+func TestParseArgs_WithWebSearch(t *testing.T) {
+	a, err := parseArgs([]string{"--with-websearch"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !a.WithWebSearch {
+		t.Errorf("expected WithWebSearch=true")
+	}
+	if !a.WithWebSearchSet {
+		t.Errorf("expected WithWebSearchSet=true when --with-websearch is passed")
+	}
+}
+
+func TestParseArgs_WithWebSearchDefault(t *testing.T) {
+	a, _ := parseArgs([]string{})
+	if a.WithWebSearch {
+		t.Errorf("expected WithWebSearch=false by default")
+	}
+	if a.WithWebSearchSet {
+		t.Errorf("expected WithWebSearchSet=false when --with-websearch is not passed")
+	}
+}
+
+func TestParseArgs_WebSearchBackend(t *testing.T) {
+	a, err := parseArgs([]string{"--websearch-backend", "duckduckgo"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if a.WebSearchBackend != "duckduckgo" {
+		t.Errorf("expected WebSearchBackend=duckduckgo, got %q", a.WebSearchBackend)
+	}
+	if !a.WebSearchBackendSet {
+		t.Errorf("expected WebSearchBackendSet=true")
+	}
+}
+
+func TestParseArgs_WebSearchBackendEquals(t *testing.T) {
+	a, _ := parseArgs([]string{"--websearch-backend=none"})
+	if a.WebSearchBackend != "none" {
+		t.Errorf("expected WebSearchBackend=none, got %q", a.WebSearchBackend)
+	}
+	if !a.WebSearchBackendSet {
+		t.Errorf("expected WebSearchBackendSet=true")
+	}
+}
+
+func TestParseArgs_WebSearchFetchBudget(t *testing.T) {
+	a, err := parseArgs([]string{"--websearch-fetch-budget", "204800"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if a.WebSearchFetchBudget != 204800 {
+		t.Errorf("expected WebSearchFetchBudget=204800, got %d", a.WebSearchFetchBudget)
+	}
+	if !a.WebSearchFetchBudgetSet {
+		t.Errorf("expected WebSearchFetchBudgetSet=true")
+	}
+}
+
+func TestParseArgs_WebSearchFetchBudgetEquals(t *testing.T) {
+	a, _ := parseArgs([]string{"--websearch-fetch-budget=51200"})
+	if a.WebSearchFetchBudget != 51200 {
+		t.Errorf("expected WebSearchFetchBudget=51200, got %d", a.WebSearchFetchBudget)
+	}
+}
+
+func TestParseArgs_AllWebSearchFlagsTogether(t *testing.T) {
+	a, _ := parseArgs([]string{"--with-websearch", "--websearch-backend", "duckduckgo", "--websearch-fetch-budget", "65536"})
+	if !a.WithWebSearch {
+		t.Errorf("expected WithWebSearch=true")
+	}
+	if a.WebSearchBackend != "duckduckgo" {
+		t.Errorf("expected WebSearchBackend=duckduckgo, got %q", a.WebSearchBackend)
+	}
+	if a.WebSearchFetchBudget != 65536 {
+		t.Errorf("expected WebSearchFetchBudget=65536, got %d", a.WebSearchFetchBudget)
+	}
+}
+
 func TestParseArgs_EmptyArgs(t *testing.T) {
 	a, _ := parseArgs([]string{})
 	if a.Profile != "" {

@@ -26,6 +26,7 @@ import (
 	"github.com/IceRhymers/databricks-claude/pkg/proxy"
 	"github.com/IceRhymers/databricks-claude/pkg/refcount"
 	"github.com/IceRhymers/databricks-claude/pkg/updater"
+	"github.com/IceRhymers/databricks-claude/pkg/websearch"
 )
 
 // Version is set at build time via -ldflags.
@@ -63,6 +64,12 @@ type Args struct {
 	HeadlessEnsure      bool
 	HeadlessRelease     bool
 	NoUpdateCheck       bool
+	WithWebSearch          bool
+	WithWebSearchSet       bool
+	WebSearchBackend       string
+	WebSearchBackendSet    bool
+	WebSearchFetchBudget   int
+	WebSearchFetchBudgetSet bool
 	ClaudeArgs          []string
 }
 
@@ -497,6 +504,68 @@ func main() {
 		log.Fatalf("databricks-claude: %v", err)
 	}
 
+	// --- Resolve --with-websearch (workaround) settings ---
+	// Resolution chain: flag (if set) > saved state > default. Persist any
+	// flag value back to state so users only opt in once. Mirrors the
+	// OTEL-table persistence pattern.
+	wsState := loadState()
+	withWebSearch := wsState.WithWebSearch
+	wsBackend := wsState.WebSearchBackend
+	wsBudget := wsState.WebSearchFetchBudget
+	if a.WithWebSearchSet {
+		withWebSearch = a.WithWebSearch
+	}
+	if a.WebSearchBackendSet {
+		wsBackend = a.WebSearchBackend
+	}
+	if a.WebSearchFetchBudgetSet {
+		wsBudget = a.WebSearchFetchBudget
+	}
+	if wsBackend == "" {
+		wsBackend = "duckduckgo"
+	}
+	if wsBudget <= 0 {
+		wsBudget = 100 * 1024
+	}
+	{
+		mutated := false
+		if a.WithWebSearchSet && wsState.WithWebSearch != withWebSearch {
+			wsState.WithWebSearch = withWebSearch
+			mutated = true
+		}
+		if a.WebSearchBackendSet && wsState.WebSearchBackend != wsBackend {
+			wsState.WebSearchBackend = wsBackend
+			mutated = true
+		}
+		if a.WebSearchFetchBudgetSet && wsState.WebSearchFetchBudget != wsBudget {
+			wsState.WebSearchFetchBudget = wsBudget
+			mutated = true
+		}
+		if mutated {
+			if err := saveState(wsState); err != nil {
+				log.Printf("databricks-claude: warning: could not persist websearch state: %v", err)
+			}
+		}
+	}
+
+	// Build the websearch backend (if enabled) and print the workaround warning.
+	var wsBackendImpl websearch.Backend
+	var wsRobots websearch.RobotsChecker
+	if withWebSearch {
+		fmt.Fprintln(os.Stderr, "databricks-claude: --with-websearch is a workaround. Anthropic's native")
+		fmt.Fprintln(os.Stderr, "  web_search and web_fetch tools are not yet supported by Databricks FMAPI.")
+		fmt.Fprintf(os.Stderr, "  This proxy fulfills them locally via backend=%q (per-fetch budget=%d bytes).\n", wsBackend, wsBudget)
+		fmt.Fprintln(os.Stderr, "  Limitations: no JavaScript rendering; robots.txt enforced; headless only.")
+		fmt.Fprintln(os.Stderr, "  This flag will be removed (with one release of deprecation warning) when")
+		fmt.Fprintln(os.Stderr, "  Databricks ships native server-side tool support.")
+		b, err := buildWebSearchBackend(wsBackend)
+		if err != nil {
+			log.Fatalf("databricks-claude: %v", err)
+		}
+		wsBackendImpl = b
+		wsRobots = &websearch.Robots{}
+	}
+
 	// --- Bind proxy port ---
 	ln, isOwner, err := portbind.Bind("databricks-claude", port)
 	if err != nil {
@@ -524,6 +593,12 @@ func main() {
 		TLSKeyFile:        a.TLSKey,
 		ToolName:          "databricks-claude",
 		Version:           Version,
+		WebSearch: proxy.WebSearchSettings{
+			Enabled:     withWebSearch,
+			Backend:     wsBackendImpl,
+			Robots:      wsRobots,
+			FetchBudget: wsBudget,
+		},
 	}
 	if a.ProxyAPIKey != "" {
 		fmt.Fprintln(os.Stderr, "databricks-claude: proxy API key authentication enabled")
@@ -879,6 +954,36 @@ func parseArgs(args []string) (*Args, error) {
 					a.HeadlessRelease = true
 				case "--no-update-check":
 					a.NoUpdateCheck = true
+				case "--with-websearch":
+					a.WithWebSearch = true
+					a.WithWebSearchSet = true
+					// Allow optional explicit value: --with-websearch=true|false
+					if value != "" {
+						a.WithWebSearch = (value == "1" || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes"))
+					}
+				case "--websearch-backend":
+					if value != "" {
+						a.WebSearchBackend = value
+						a.WebSearchBackendSet = true
+					} else if i+1 < len(args) {
+						i++
+						a.WebSearchBackend = args[i]
+						a.WebSearchBackendSet = true
+					}
+				case "--websearch-fetch-budget":
+					raw := value
+					if raw == "" && i+1 < len(args) {
+						i++
+						raw = args[i]
+					}
+					if raw != "" {
+						if n, err := strconv.Atoi(raw); err == nil {
+							a.WebSearchFetchBudget = n
+							a.WebSearchFetchBudgetSet = true
+						} else {
+							return nil, fmt.Errorf("--websearch-fetch-budget: %q is not an integer", raw)
+						}
+					}
 				case "--idle-timeout":
 					raw := value
 					if raw == "" && i+1 < len(args) {
@@ -944,6 +1049,12 @@ Databricks-Claude Flags:
                                persist them; no prior databricks-claude invocation needed.
   --uninstall-hooks            Remove databricks-claude hooks from ~/.claude/settings.json
   --no-update-check            Skip the automatic update check on startup
+  --with-websearch             Enable local fulfillment of Anthropic web_search/web_fetch
+                               tools (workaround until Databricks FMAPI ships native
+                               support; saved to state). Default: disabled.
+  --websearch-backend string   Search backend when --with-websearch is enabled.
+                               Values: duckduckgo (default, zero config), none
+  --websearch-fetch-budget int Max bytes returned per web_fetch call (default 102400)
   --version                    Print version and exit
   --help, -h                   Show this help message
 

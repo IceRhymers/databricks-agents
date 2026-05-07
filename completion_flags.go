@@ -39,6 +39,9 @@ var flagDefs = []completion.FlagDef{
 	{Name: "headless-ensure", Description: "Start proxy if not running — called by the SessionStart hook"},
 	{Name: "headless-release", Description: "Decrement proxy refcount — called by the Stop hook"},
 	{Name: "no-update-check", Description: "Skip the automatic update check on startup"},
+	{Name: "with-websearch", Description: "Locally fulfill Anthropic web_search/web_fetch tools (workaround for FMAPI gap)"},
+	{Name: "websearch-backend", Description: "Web search backend (duckduckgo|none)", TakesArg: true},
+	{Name: "websearch-fetch-budget", Description: "Per-fetch byte budget for --with-websearch (default 102400)", TakesArg: true},
 }
 
 // knownFlags is the set of flag names (with "--" prefix) that databricks-claude

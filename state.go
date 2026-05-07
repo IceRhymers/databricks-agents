@@ -26,6 +26,12 @@ type persistentState struct {
 	OtelMetricsTable string `json:"otel_metrics_table,omitempty"`
 	OtelLogsTable    string `json:"otel_logs_table,omitempty"`
 	OtelTracesTable  string `json:"otel_traces_table,omitempty"`
+	// --with-websearch (workaround) — local fulfillment of Anthropic's
+	// web_search/web_fetch server-side tools when Databricks FMAPI does
+	// not yet support them. Persisted so the user only opts in once.
+	WithWebSearch        bool   `json:"with_websearch,omitempty"`
+	WebSearchBackend     string `json:"websearch_backend,omitempty"`
+	WebSearchFetchBudget int    `json:"websearch_fetch_budget,omitempty"`
 }
 
 const defaultPort = 49153

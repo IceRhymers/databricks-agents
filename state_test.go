@@ -165,3 +165,29 @@ func TestStatePath_Override(t *testing.T) {
 		t.Errorf("statePath() = %q, want %q", got, custom)
 	}
 }
+
+func TestSaveAndLoadState_WebSearch(t *testing.T) {
+	dir := t.TempDir()
+	orig := statePath
+	statePath = func() string { return filepath.Join(dir, "state.json") }
+	defer func() { statePath = orig }()
+
+	want := persistentState{
+		WithWebSearch:        true,
+		WebSearchBackend:     "duckduckgo",
+		WebSearchFetchBudget: 65536,
+	}
+	if err := saveState(want); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+	got := loadState()
+	if got.WithWebSearch != want.WithWebSearch {
+		t.Errorf("WithWebSearch: got %v, want %v", got.WithWebSearch, want.WithWebSearch)
+	}
+	if got.WebSearchBackend != want.WebSearchBackend {
+		t.Errorf("WebSearchBackend: got %q, want %q", got.WebSearchBackend, want.WebSearchBackend)
+	}
+	if got.WebSearchFetchBudget != want.WebSearchFetchBudget {
+		t.Errorf("WebSearchFetchBudget: got %d, want %d", got.WebSearchFetchBudget, want.WebSearchFetchBudget)
+	}
+}

@@ -11,9 +11,9 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -44,7 +44,7 @@ type Config struct {
 	// header is omitted for /v1/traces requests.
 	UCTracesTable string
 	TokenSource   TokenSource
-	Verbose        bool
+	Verbose       bool
 	// ToolName identifies this proxy in /health responses (e.g. "databricks-claude").
 	ToolName string
 	// Version is the build version reported by /health.
@@ -55,6 +55,12 @@ type Config struct {
 	// TLSCertFile and TLSKeyFile enable TLS on the listener when both are set.
 	TLSCertFile string
 	TLSKeyFile  string
+	// WebSearch (--with-websearch) bundles the optional local-fulfillment
+	// settings for Anthropic's web_search/web_fetch server-side tools when
+	// Databricks FMAPI doesn't yet support them. When Enabled is false,
+	// inference requests are forwarded byte-identically and this struct
+	// has no effect — see pkg/proxy/websearch_handler.go.
+	WebSearch WebSearchSettings
 }
 
 // RecoveryHandler wraps h with panic recovery, returning 502 on panic.
@@ -290,62 +296,13 @@ func NewServer(config *Config) (http.Handler, error) {
 		return nil, fmt.Errorf("databricks-claude: invalid OTELUpstream %q: %v", config.OTELUpstream, err)
 	}
 
-	// Inference proxy — default route
-	inferenceProxy := &httputil.ReverseProxy{
-		Director: func(req *http.Request) {
-			token, err := config.TokenSource.Token(req.Context())
-			if err != nil {
-				// Log the error but let the upstream return an auth failure rather
-				// than crashing; the empty bearer will be rejected by the upstream.
-				log.Printf("databricks-claude: token fetch error: %v", err)
-			}
-			if token != "" {
-				req.Header.Set("Authorization", "Bearer "+token)
-				req.Header.Set("x-api-key", token) // Anthropic SDK sends x-api-key; overwrite the "proxy-managed" placeholder
-			}
-			req.Header.Set("x-databricks-use-coding-agent-mode", "true")
-
-			req.URL.Scheme = inferenceUpstream.Scheme
-			req.URL.Host = inferenceUpstream.Host
-			req.Host = inferenceUpstream.Host // Override Host header — upstream rejects localhost
-			// Prepend the upstream base path to the incoming request path.
-			basePath := strings.TrimRight(inferenceUpstream.Path, "/")
-			req.URL.Path = basePath + req.URL.Path
-			req.URL.RawPath = ""
-
-			if config.Verbose {
-				log.Printf("databricks-claude: inference → %s %s%s", req.Method, req.URL.Host, req.URL.Path)
-			}
-		},
-		ModifyResponse: func(resp *http.Response) error {
-			if config.Verbose && resp.StatusCode >= 400 {
-				body, err := io.ReadAll(resp.Body)
-				if err == nil {
-					// Log first 500 chars of error response
-					snippet := string(body)
-					if len(snippet) > 500 {
-						snippet = snippet[:500] + "..."
-					}
-					log.Printf("databricks-claude: upstream error %d: %s", resp.StatusCode, sanitizeLogOutput(snippet))
-					// Put the body back so the caller still gets it
-					resp.Body = io.NopCloser(bytes.NewReader(body))
-				}
-			}
-			return nil
-		},
-		FlushInterval: -1,
-	}
-
-	// Wrap inference proxy with WebSocket upgrade detection.
-	// Claude Code never sends WebSocket upgrades; this branch exists for
-	// databricks-codex (Codex CLI), which uses WebSocket for inference.
-	inferenceHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isWebSocketUpgrade(r) {
-			handleWebSocket(w, r, inferenceUpstream, config)
-			return
-		}
-		inferenceProxy.ServeHTTP(w, r)
-	})
+	// Inference handler — when WebSearch.Enabled is false this is a thin
+	// custom replacement for httputil.ReverseProxy that forwards bytes
+	// verbatim (regression-tested for byte-identity); when true, it
+	// inspects /v1/messages bodies to fulfill web_search/web_fetch locally.
+	// WebSocket upgrades (used by databricks-codex) are detected inside
+	// the handler and routed through handleWebSocket.
+	inferenceHandlerHTTP := inferenceHandler(inferenceUpstream, config, config.WebSearch)
 
 	// OTEL proxy — /otel/ route
 	otelProxy := &httputil.ReverseProxy{
@@ -423,7 +380,7 @@ func NewServer(config *Config) (http.Handler, error) {
 	})
 
 	mux.Handle("/otel/", RecoveryHandler(otelProxy))
-	mux.Handle("/", RecoveryHandler(inferenceHandler))
+	mux.Handle("/", RecoveryHandler(inferenceHandlerHTTP))
 
 	// APIKey check applies to all connections including WebSocket upgrades (used by databricks-codex)
 	return requireAPIKey(mux, config.APIKey), nil

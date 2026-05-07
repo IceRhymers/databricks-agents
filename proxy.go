@@ -23,6 +23,8 @@ type ProxyConfig struct {
 	TLSKeyFile        string
 	ToolName          string // reported by /health endpoint
 	Version           string // reported by /health endpoint
+	// WebSearch (--with-websearch) — see pkg/proxy.WebSearchSettings.
+	WebSearch proxy.WebSearchSettings
 }
 
 // recoveryHandler wraps h with panic recovery, returning 502 on panic.
@@ -46,6 +48,7 @@ func NewProxyServer(config *ProxyConfig) http.Handler {
 		APIKey:            config.APIKey,
 		ToolName:          config.ToolName,
 		Version:           config.Version,
+		WebSearch:         config.WebSearch,
 	})
 	if err != nil {
 		log.Fatalf("databricks-claude: %v", err)
