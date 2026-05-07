@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.18.0](https://github.com/IceRhymers/databricks-claude/compare/v0.17.0...v0.18.0) (2026-05-07)
+
+
+### Features
+
+* --with-websearch — local fulfillment of web_search/web_fetch (workaround) ([0a0e978](https://github.com/IceRhymers/databricks-claude/commit/0a0e9786c0551f5c85937512d6bb93a17a9c3d9e))
+* --with-websearch — local fulfillment of web_search/web_fetch (workaround) ([dcb8eb9](https://github.com/IceRhymers/databricks-claude/commit/dcb8eb9f28eeeca476cb3dd88a602a8e4d615696)), closes [#141](https://github.com/IceRhymers/databricks-claude/issues/141)
+* enhance web_search/web_fetch handling with SSE rewriter and local fulfillment ([78edb38](https://github.com/IceRhymers/databricks-claude/commit/78edb38798f05e63ab988047155a4243ae47d09d))
+
+
+### Bug Fixes
+
+* surface --with-websearch flags in --help output ([9cb767c](https://github.com/IceRhymers/databricks-claude/commit/9cb767c3e611da572cf5ee942e0d478c836dfac6))
+* **websearch:** emit input:{} on server_tool_use start, inject error on overflow ([4c32b0e](https://github.com/IceRhymers/databricks-claude/commit/4c32b0e21173ae9f9402b42643fa6b4b5a3c9218))
+
 ## [0.17.0](https://github.com/IceRhymers/databricks-claude/compare/v0.16.0...v0.17.0) (2026-05-06)
 
 
