@@ -68,8 +68,10 @@ databricks-claude --with-websearch --profile <name>
 
 How it works:
 
-- The proxy detects `web_search_*` and `web_fetch_*` entries in outgoing `/v1/messages` requests and rewrites them to standard client-tool definitions named `web_search` and `web_fetch`.
-- When the model emits a `tool_use` block targeting one of those names, Claude Code's own tool loop sees an unknown tool and returns an error `tool_result` on the next turn. The proxy intercepts that `tool_result` and substitutes its own locally-fulfilled output before forwarding upstream.
+- The proxy detects `web_search_*` and `web_fetch_*` entries in outgoing `/v1/messages` requests and rewrites them to standard client-tool definitions named `web_search` and `web_fetch`. This is required because the AI Gateway rejects unknown server-tool types.
+- On the response side, the proxy parses the SSE stream from the AI Gateway. When the model emits a `tool_use` block for the rewritten `web_search`/`web_fetch` tool, the proxy: (a) rewrites the on-the-wire block type to `server_tool_use`, (b) accumulates the streaming `input_json_delta` fragments to assemble the tool's input, (c) executes the local backend (`Search` or `Fetch`), and (d) injects a synthetic `web_search_tool_result` content block per Anthropic's documented shape so Claude Code's helper sees results inline.
+- For non-streaming (`stream=false`) responses, the proxy applies the same transformation to the JSON body before forwarding.
+- A legacy fallback path also handles generic Anthropic API clients that do a client-tool loop: if the client returns an `is_error` `tool_result` for the rewritten tool, the proxy substitutes locally-fulfilled output on the next turn.
 - All fulfillment is **headless** — pure stdlib HTTP, no browser process. JavaScript-rendered pages are not supported.
 - `robots.txt` is enforced per host with a session cache.
 

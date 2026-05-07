@@ -172,3 +172,178 @@ func ToolDescription(toolJSON []byte) string {
 	_ = json.Unmarshal(toolJSON, &probe)
 	return probe.Description
 }
+
+// Response is the minimal-but-roundtrip-safe shape of an Anthropic
+// /v1/messages response body for the non-streaming path. Mirrors Request:
+// any unknown top-level fields end up in Extras and re-emit verbatim.
+type Response struct {
+	ID         string            `json:"-"`
+	Type       string            `json:"-"`
+	Role       string            `json:"-"`
+	Model      string            `json:"-"`
+	Content    []json.RawMessage `json:"-"`
+	StopReason string            `json:"-"`
+	Extras     map[string]json.RawMessage
+}
+
+// UnmarshalJSON implements custom decoding that preserves unknown fields.
+func (r *Response) UnmarshalJSON(data []byte) error {
+	raw := map[string]json.RawMessage{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	r.Extras = map[string]json.RawMessage{}
+	for k, v := range raw {
+		switch k {
+		case "id":
+			_ = json.Unmarshal(v, &r.ID)
+		case "type":
+			_ = json.Unmarshal(v, &r.Type)
+		case "role":
+			_ = json.Unmarshal(v, &r.Role)
+		case "model":
+			_ = json.Unmarshal(v, &r.Model)
+		case "content":
+			_ = json.Unmarshal(v, &r.Content)
+		case "stop_reason":
+			_ = json.Unmarshal(v, &r.StopReason)
+		default:
+			r.Extras[k] = v
+		}
+	}
+	return nil
+}
+
+// MarshalJSON re-emits canonical fields plus Extras.
+func (r *Response) MarshalJSON() ([]byte, error) {
+	out := map[string]json.RawMessage{}
+	for k, v := range r.Extras {
+		out[k] = v
+	}
+	if r.ID != "" {
+		b, _ := json.Marshal(r.ID)
+		out["id"] = b
+	}
+	if r.Type != "" {
+		b, _ := json.Marshal(r.Type)
+		out["type"] = b
+	}
+	if r.Role != "" {
+		b, _ := json.Marshal(r.Role)
+		out["role"] = b
+	}
+	if r.Model != "" {
+		b, _ := json.Marshal(r.Model)
+		out["model"] = b
+	}
+	if r.Content != nil {
+		b, err := json.Marshal(r.Content)
+		if err != nil {
+			return nil, err
+		}
+		out["content"] = b
+	}
+	if r.StopReason != "" {
+		b, _ := json.Marshal(r.StopReason)
+		out["stop_reason"] = b
+	}
+	return json.Marshal(out)
+}
+
+// WebSearchResult mirrors a single entry inside a web_search_tool_result
+// content block's content array. Shape verified from
+// https://platform.claude.com/docs/en/docs/agents-and-tools/tool-use/web-search-tool
+// (2026-05-07): {type: "web_search_result", url, title, encrypted_content,
+// page_age}. EncryptedContent is required for multi-turn citations but can
+// be empty for one-shot consumers like Claude Code's WebSearch helper.
+type WebSearchResult struct {
+	URL              string `json:"url"`
+	Title            string `json:"title"`
+	EncryptedContent string `json:"encrypted_content"`
+	PageAge          string `json:"page_age,omitempty"`
+}
+
+// BuildWebSearchSuccessBlock returns a JSON-encoded web_search_tool_result
+// success block. The provided results are wrapped in {type:"web_search_result"}
+// envelopes per the Anthropic spec.
+func BuildWebSearchSuccessBlock(toolUseID string, results []WebSearchResult) ([]byte, error) {
+	wrapped := make([]map[string]string, 0, len(results))
+	for _, r := range results {
+		entry := map[string]string{
+			"type":              "web_search_result",
+			"url":               r.URL,
+			"title":             r.Title,
+			"encrypted_content": r.EncryptedContent,
+		}
+		if r.PageAge != "" {
+			entry["page_age"] = r.PageAge
+		}
+		wrapped = append(wrapped, entry)
+	}
+	out := map[string]any{
+		"type":        "web_search_tool_result",
+		"tool_use_id": toolUseID,
+		"content":     wrapped,
+	}
+	return json.Marshal(out)
+}
+
+// BuildWebSearchErrorBlock returns a JSON-encoded web_search_tool_result
+// error block. errorCode must be one of: too_many_requests, invalid_input,
+// max_uses_exceeded, query_too_long, unavailable.
+func BuildWebSearchErrorBlock(toolUseID, errorCode string) ([]byte, error) {
+	out := map[string]any{
+		"type":        "web_search_tool_result",
+		"tool_use_id": toolUseID,
+		"content": map[string]string{
+			"type":       "web_search_tool_result_error",
+			"error_code": errorCode,
+		},
+	}
+	return json.Marshal(out)
+}
+
+// BuildWebFetchSuccessBlock folds a fetched URL+text pair into the
+// web_search_tool_result envelope. Anthropic's spec does not yet define a
+// dedicated web_fetch_tool_result type; we reuse the search result envelope
+// with a single entry. The `text` is appended to the title since the spec
+// has no dedicated text/snippet field.
+func BuildWebFetchSuccessBlock(toolUseID, fetchURL, text string, truncated bool) ([]byte, error) {
+	title := fetchURL
+	if text != "" {
+		// Truncate text fold in title to a reasonable size. Claude Code's
+		// renderer trims long titles but the field accepts arbitrary length.
+		const maxFold = 4000
+		if len(text) > maxFold {
+			text = text[:maxFold] + "…"
+		}
+		if truncated {
+			text += " [truncated]"
+		}
+		title = fetchURL + " — " + text
+	}
+	results := []WebSearchResult{{URL: fetchURL, Title: title}}
+	return BuildWebSearchSuccessBlock(toolUseID, results)
+}
+
+// ParseWebSearchInput extracts {query} from a tool_use input JSON blob.
+func ParseWebSearchInput(jsonBytes []byte) (string, error) {
+	var in struct {
+		Query string `json:"query"`
+	}
+	if err := json.Unmarshal(jsonBytes, &in); err != nil {
+		return "", err
+	}
+	return in.Query, nil
+}
+
+// ParseWebFetchInput extracts {url} from a tool_use input JSON blob.
+func ParseWebFetchInput(jsonBytes []byte) (string, error) {
+	var in struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(jsonBytes, &in); err != nil {
+		return "", err
+	}
+	return in.URL, nil
+}

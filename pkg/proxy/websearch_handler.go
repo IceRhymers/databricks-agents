@@ -61,9 +61,13 @@ func inferenceHandler(upstream *url.URL, config *Config, ws WebSearchSettings) h
 			r.Body.Close()
 		}
 
+		var rewroteTools rewrittenTools
 		if ws.Enabled && isMessagesPath(r.URL.Path) && len(bodyBytes) > 0 {
-			if mutated, ok := tryRewriteRequest(r.Context(), bodyBytes, ws); ok {
+			if mutated, tools, ok := tryRewriteRequest(r.Context(), bodyBytes, ws, config.Verbose); ok {
 				bodyBytes = mutated
+				rewroteTools = tools
+			} else if config.Verbose {
+				log.Printf("databricks-claude: websearch: no rewrite applied to /v1/messages (no web_search_*/web_fetch_* tools and no annotated tool_results matched)")
 			}
 		}
 
@@ -116,9 +120,32 @@ func inferenceHandler(upstream *url.URL, config *Config, ws WebSearchSettings) h
 		}
 		defer resp.Body.Close()
 
-		// Copy response headers + status, then stream body. We avoid any
-		// surgery here so SSE pass-through is identical to the previous
-		// FlushInterval:-1 ReverseProxy.
+		// PASSTHROUGH FAST PATH (also load-bearing for byte-identity):
+		// If the request rewrite did not touch any web_search_*/web_fetch_*
+		// tools, forward the response verbatim with a flushing copy. This
+		// is the FIRST check on the response side — no JSON/SSE inspection,
+		// no buffering. Required by TestProxy_WebSearchDisabled_ByteIdenticalForward.
+		if !rewroteTools.Any() {
+			for k, vv := range resp.Header {
+				if isHopByHop(k) {
+					continue
+				}
+				for _, v := range vv {
+					w.Header().Add(k, v)
+				}
+			}
+			w.WriteHeader(resp.StatusCode)
+			flushingCopy(w, resp.Body, config.Verbose)
+			return
+		}
+
+		// REWRITE PATHS: copy headers (excluding hop-by-hop), but strip
+		// Content-Length so the rewritten body length is correct on the wire.
+		// (Tool_use blocks are terminal in current Anthropic streams — once
+		// content_block_stop fires for a tool_use, no further text deltas
+		// are generated. Synchronous local-fulfillment inside pumpSSE
+		// therefore does not block any other content. If Anthropic changes
+		// behavior to interleave text + tool_use, liveness must be revisited.)
 		for k, vv := range resp.Header {
 			if isHopByHop(k) {
 				continue
@@ -127,32 +154,72 @@ func inferenceHandler(upstream *url.URL, config *Config, ws WebSearchSettings) h
 				w.Header().Add(k, v)
 			}
 		}
-		w.WriteHeader(resp.StatusCode)
-		// Use a flushing copy so SSE chunks are forwarded as they arrive.
-		flusher, _ := w.(http.Flusher)
-		buf := make([]byte, 4096)
-		for {
-			n, rerr := resp.Body.Read(buf)
-			if n > 0 {
-				if _, werr := w.Write(buf[:n]); werr != nil {
-					return
-				}
-				if flusher != nil {
-					flusher.Flush()
-				}
+		w.Header().Del("Content-Length")
+
+		switch {
+		case isSSEResponse(resp):
+			w.WriteHeader(resp.StatusCode)
+			if err := pumpSSE(r.Context(), w, resp.Body, ws, rewroteTools, config.Verbose); err != nil && config.Verbose {
+				log.Printf("databricks-claude: websearch: SSE pump err: %v", err)
 			}
+			return
+		case isJSONResponse(resp):
+			const maxRespBytes = 8 * 1024 * 1024
+			limited := io.LimitReader(resp.Body, maxRespBytes+1)
+			body, rerr := io.ReadAll(limited)
 			if rerr != nil {
-				if rerr != io.EOF && config.Verbose {
-					log.Printf("databricks-claude: response read err: %v", rerr)
-				}
+				http.Error(w, "read upstream JSON failed", http.StatusBadGateway)
 				return
 			}
+			out, jerr := rewriteJSONResponse(r.Context(), body, ws, config.Verbose)
+			if jerr != nil && config.Verbose {
+				log.Printf("databricks-claude: websearch: JSON rewrite err: %v (forwarding original)", jerr)
+				out = body
+			}
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(out)))
+			w.WriteHeader(resp.StatusCode)
+			_, _ = w.Write(out)
+			return
+		default:
+			// Unknown content-type: defensive passthrough with flushing copy.
+			if config.Verbose {
+				log.Printf("databricks-claude: websearch: unexpected Content-Type %q on rewrite path; passing through", resp.Header.Get("Content-Type"))
+			}
+			w.WriteHeader(resp.StatusCode)
+			flushingCopy(w, resp.Body, config.Verbose)
+			return
 		}
 	})
 }
 
 func isMessagesPath(p string) bool {
 	return strings.HasSuffix(p, "/v1/messages") || strings.Contains(p, "/v1/messages?")
+}
+
+// flushingCopy streams src to w with per-chunk Flush so SSE chunks reach
+// the client as they arrive. Used by the byte-identity passthrough fast
+// path AND the unknown-content-type defensive branch — keep these two
+// callers in lockstep.
+func flushingCopy(w http.ResponseWriter, src io.Reader, verbose bool) {
+	flusher, _ := w.(http.Flusher)
+	buf := make([]byte, 4096)
+	for {
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if rerr != nil {
+			if rerr != io.EOF && verbose {
+				log.Printf("databricks-claude: response read err: %v", rerr)
+			}
+			return
+		}
+	}
 }
 
 // isHopByHop reports whether a header is in RFC 7230 hop-by-hop set.
@@ -168,43 +235,88 @@ func isHopByHop(h string) bool {
 // tryRewriteRequest attempts to decode body as an Anthropic Messages
 // request, rewrite web_search_*/web_fetch_* tools, and substitute any
 // is_error tool_result blocks targeting our annotated tool_use's. Returns
-// the (possibly mutated) body bytes and ok=true if a successful rewrite was
-// done; otherwise ok=false and bodyBytes is unchanged.
-func tryRewriteRequest(ctx context.Context, body []byte, ws WebSearchSettings) ([]byte, bool) {
+// the (possibly mutated) body bytes, a rewrittenTools struct describing
+// which kinds of server tools were touched (used by the response-side
+// SSE/JSON rewriter), and ok=true if a successful rewrite was done.
+// On ok=false the body is unchanged and rewrittenTools is zero.
+func tryRewriteRequest(ctx context.Context, body []byte, ws WebSearchSettings, verbose bool) ([]byte, rewrittenTools, bool) {
+	var rt rewrittenTools
 	var req anthropic.Request
 	if err := json.Unmarshal(body, &req); err != nil {
-		return body, false
+		if verbose {
+			log.Printf("databricks-claude: websearch: body not JSON-decodable as Anthropic Request: %v", err)
+		}
+		return body, rt, false
+	}
+
+	if verbose {
+		names := make([]string, 0, len(req.Tools))
+		for _, t := range req.Tools {
+			var probe struct {
+				Name string `json:"name"`
+				Type string `json:"type"`
+			}
+			_ = json.Unmarshal(t, &probe)
+			if probe.Type != "" {
+				names = append(names, probe.Type)
+			} else {
+				names = append(names, probe.Name)
+			}
+		}
+		log.Printf("databricks-claude: websearch: /v1/messages tools=%d %v", len(req.Tools), names)
 	}
 
 	// Phase 1: walk Tools and rewrite web_search_*/web_fetch_*.
+	rewroteSearch, rewroteFetch := 0, 0
 	if len(req.Tools) > 0 {
 		for i, t := range req.Tools {
 			switch {
 			case anthropic.IsWebSearchTool(t):
 				req.Tools[i] = anthropic.RewriteWebSearchTool()
+				rewroteSearch++
 			case anthropic.IsWebFetchTool(t):
 				req.Tools[i] = anthropic.RewriteWebFetchTool()
+				rewroteFetch++
 			}
 		}
+	}
+	if rewroteSearch > 0 {
+		rt.HasWebSearch = true
+	}
+	if rewroteFetch > 0 {
+		rt.HasWebFetch = true
+	}
+	if verbose && (rewroteSearch+rewroteFetch) > 0 {
+		log.Printf("databricks-claude: websearch: rewrote tools web_search=%d web_fetch=%d", rewroteSearch, rewroteFetch)
 	}
 
 	// Phase 2: walk Messages, build a map of tool_use_id → {name, input}
 	// for assistant tool_use blocks targeting our annotated tools, then
 	// substitute any subsequent user tool_result blocks whose IDs match.
 	annotated := scanAnnotatedToolUses(req.Messages)
+	substituted := 0
 	if len(annotated) > 0 {
 		for i, msg := range req.Messages {
 			if mutated, ok := substituteToolResults(ctx, msg, annotated, ws); ok {
 				req.Messages[i] = mutated
+				substituted++
 			}
 		}
+	}
+	if verbose {
+		log.Printf("databricks-claude: websearch: annotated tool_use_ids=%d substituted messages=%d", len(annotated), substituted)
+	}
+
+	// If nothing changed, signal "no rewrite" so the outer code can log that.
+	if rewroteSearch+rewroteFetch+substituted == 0 {
+		return body, rt, false
 	}
 
 	out, err := json.Marshal(&req)
 	if err != nil {
-		return body, false
+		return body, rt, false
 	}
-	return out, true
+	return out, rt, true
 }
 
 type annotatedToolUse struct {
