@@ -10,14 +10,25 @@ where no `~/.claude/.databricks-claude.json` state file exists.
 ## API
 
 ```go
-// Read returns the value of the "databricksProfile" key from the MDM-managed
-// preferences for the given domain. Returns "" (nil error) when no value is
-// set or on any read error.
+// ReadKey returns the value of an arbitrary key from the MDM-managed
+// preferences for the given domain. Returns "" (nil error) when no value
+// is set or on any read error. This is the primary API — multiple keys
+// per domain are now supported (e.g. databricksProfile, databricksCliPath).
+func ReadKey(domain, key string) (string, error)
+
+// Read is a thin shim preserved for backward compatibility: it returns
+// ReadKey(domain, "databricksProfile"). Prefer ReadKey for new callers.
 func Read(domain string) (string, error)
 ```
 
-Call with `"com.icerhymers.databricks-claude"` to read the Databricks profile
-written by the fleet `.mobileconfig` or `.reg` artifact.
+Call with `"com.icerhymers.databricks-claude"` as the domain. Today's recognised
+keys are `databricksProfile` (#146) and `databricksCliPath` (#150), both
+written by the fleet `.mobileconfig` or `.reg` artifact generated via
+`databricks-claude desktop generate-config`.
+
+Adding a new MDM key:
+1. Generator side: extend the builder (`buildMobileconfig`/`buildRegFile`/`buildDevModeJSON`) in `desktop_config.go` to emit the new key when populated.
+2. Reader side: call `mdmprofile.ReadKey(domain, "<your-key>")` from the resolution chain that needs it. No changes required in this package — `ReadKey` is the generic API.
 
 ## Key Files
 

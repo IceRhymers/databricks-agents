@@ -110,3 +110,115 @@ func TestResolveDatabricksCLI_FallbackDir(t *testing.T) {
 		t.Errorf("expected fallback dir resolution to %q, got %q", fake, got)
 	}
 }
+
+// makeExec creates an executable file at path and returns the path.
+func makeExec(t *testing.T, path string) string {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+		t.Fatalf("makeExec: %v", err)
+	}
+	return path
+}
+
+// withMDMReader temporarily replaces the package-level mdmReader for a test.
+func withMDMReader(t *testing.T, r MDMReader) {
+	t.Helper()
+	orig := mdmReader
+	t.Cleanup(func() { mdmReader = orig })
+	mdmReader = r
+}
+
+func TestResolveDatabricksCLI_MDM_ExecutablePath(t *testing.T) {
+	dir := t.TempDir()
+	mdmBin := makeExec(t, filepath.Join(dir, "databricks-mdm"))
+
+	withMDMReader(t, func(_, _ string) (string, error) { return mdmBin, nil })
+	t.Setenv("DATABRICKS_CLI", "") // ensure env tier doesn't fire
+
+	got := ResolveDatabricksCLI("databricks")
+	if got != mdmBin {
+		t.Errorf("ResolveDatabricksCLI MDM executable: got %q, want %q", got, mdmBin)
+	}
+}
+
+func TestResolveDatabricksCLI_MDM_NonExecutable_FallsThrough(t *testing.T) {
+	dir := t.TempDir()
+	// Non-executable file in MDM; an executable in fallback dir.
+	nonExec := filepath.Join(dir, "databricks-notexec")
+	if err := os.WriteFile(nonExec, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fallbackBin := makeExec(t, filepath.Join(dir, "databricks"))
+
+	withMDMReader(t, func(_, _ string) (string, error) { return nonExec, nil })
+	t.Setenv("DATABRICKS_CLI", "")
+
+	orig := FallbackCLIDirs
+	FallbackCLIDirs = []string{dir}
+	defer func() { FallbackCLIDirs = orig }()
+
+	got := ResolveDatabricksCLI("databricks")
+	if got == nonExec {
+		t.Errorf("ResolveDatabricksCLI should not return non-executable MDM path %q", nonExec)
+	}
+	if got != fallbackBin {
+		t.Errorf("ResolveDatabricksCLI MDM non-executable: got %q, want fallback %q", got, fallbackBin)
+	}
+}
+
+func TestResolveDatabricksCLI_MDM_Unset_NoRegression(t *testing.T) {
+	dir := t.TempDir()
+	fallbackBin := makeExec(t, filepath.Join(dir, "databricks"))
+
+	withMDMReader(t, func(_, _ string) (string, error) { return "", nil })
+	t.Setenv("DATABRICKS_CLI", "")
+
+	orig := FallbackCLIDirs
+	FallbackCLIDirs = []string{dir}
+	defer func() { FallbackCLIDirs = orig }()
+
+	got := ResolveDatabricksCLI("databricks")
+	if got != fallbackBin {
+		t.Errorf("ResolveDatabricksCLI MDM unset: got %q, want fallback %q", got, fallbackBin)
+	}
+}
+
+func TestResolveDatabricksCLI_AbsoluteBeforeMDM(t *testing.T) {
+	// An absolute cmdName (state.DatabricksCLIPath) must be returned before
+	// the MDM tier is consulted.
+	dir := t.TempDir()
+	stateBin := makeExec(t, filepath.Join(dir, "databricks-state"))
+	mdmCalled := false
+	withMDMReader(t, func(_, _ string) (string, error) {
+		mdmCalled = true
+		return filepath.Join(dir, "databricks-mdm"), nil
+	})
+
+	got := ResolveDatabricksCLI(stateBin)
+	if got != stateBin {
+		t.Errorf("absolute path should be returned unchanged, got %q", got)
+	}
+	if mdmCalled {
+		t.Error("MDM reader must not be called when cmdName is absolute")
+	}
+}
+
+func TestResolveDatabricksCLI_EnvBeforeMDM(t *testing.T) {
+	dir := t.TempDir()
+	envBin := makeExec(t, filepath.Join(dir, "databricks-env"))
+	mdmCalled := false
+
+	t.Setenv("DATABRICKS_CLI", envBin)
+	withMDMReader(t, func(_, _ string) (string, error) {
+		mdmCalled = true
+		return filepath.Join(dir, "databricks-mdm"), nil
+	})
+
+	got := ResolveDatabricksCLI("databricks")
+	if got != envBin {
+		t.Errorf("$DATABRICKS_CLI should win over MDM, got %q want %q", got, envBin)
+	}
+	if mdmCalled {
+		t.Error("MDM reader must not be called when $DATABRICKS_CLI is set and executable")
+	}
+}

@@ -38,7 +38,7 @@ func TestNewUUID_FormatAndUniqueness(t *testing.T) {
 func TestBuildMobileconfig_ContainsRequiredKeys(t *testing.T) {
 	gateway := "https://adb-abc-123.azuredatabricks.net/ai-gateway/anthropic"
 	helper := "/usr/local/bin/databricks-claude"
-	out, err := buildMobileconfig(gateway, helper, "myws")
+	out, err := buildMobileconfig(gateway, helper, "myws", "")
 	if err != nil {
 		t.Fatalf("buildMobileconfig: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestBuildMobileconfig_ContainsRequiredKeys(t *testing.T) {
 }
 
 func TestBuildMobileconfig_SecondPayload(t *testing.T) {
-	out, err := buildMobileconfig("https://x.example.com/anthropic", "/bin/h", "fleet-profile")
+	out, err := buildMobileconfig("https://x.example.com/anthropic", "/bin/h", "fleet-profile", "")
 	if err != nil {
 		t.Fatalf("buildMobileconfig: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestBuildMobileconfig_EscapesSpecialChars(t *testing.T) {
 	// Gateway URL with an ampersand should be plist-escaped.
 	gateway := "https://example.com/anthropic?a=1&b=2"
 	helper := "/Applications/Foo & Bar/databricks-claude"
-	out, err := buildMobileconfig(gateway, helper, "DEFAULT")
+	out, err := buildMobileconfig(gateway, helper, "DEFAULT", "")
 	if err != nil {
 		t.Fatalf("buildMobileconfig: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestBuildMobileconfig_EscapesSpecialChars(t *testing.T) {
 }
 
 func TestBuildMobileconfig_UniqueUUIDs(t *testing.T) {
-	out, err := buildMobileconfig("https://x", "/bin/x", "DEFAULT")
+	out, err := buildMobileconfig("https://x", "/bin/x", "DEFAULT", "")
 	if err != nil {
 		t.Fatalf("buildMobileconfig: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestBuildMobileconfig_UniqueUUIDs(t *testing.T) {
 func TestBuildRegFile_ContainsRequiredKeys(t *testing.T) {
 	gateway := "https://adb-abc-123.azuredatabricks.net/ai-gateway/anthropic"
 	helper := `C:\Program Files\databricks-claude\databricks-claude.exe`
-	out := buildRegFile(gateway, helper, "fleet-ws")
+	out := buildRegFile(gateway, helper, "fleet-ws", "")
 
 	for _, want := range []string{
 		`Windows Registry Editor Version 5.00`,
@@ -453,7 +453,7 @@ const devTestProfile = "test-profile"
 
 func decodeDevJSON(t *testing.T) map[string]any {
 	t.Helper()
-	out, err := buildDevModeJSON(devTestGateway, devTestHelper, devTestProfile)
+	out, err := buildDevModeJSON(devTestGateway, devTestHelper, devTestProfile, "")
 	if err != nil {
 		t.Fatalf("buildDevModeJSON: %v", err)
 	}
@@ -508,7 +508,7 @@ func TestBuildDevModeJSON_ContainsRequiredKeys(t *testing.T) {
 }
 
 func TestBuildDevModeJSON_ValidJSONAndTrailingNewline(t *testing.T) {
-	out, err := buildDevModeJSON(devTestGateway, devTestHelper, devTestProfile)
+	out, err := buildDevModeJSON(devTestGateway, devTestHelper, devTestProfile, "")
 	if err != nil {
 		t.Fatalf("buildDevModeJSON: %v", err)
 	}
@@ -522,7 +522,7 @@ func TestBuildDevModeJSON_ValidJSONAndTrailingNewline(t *testing.T) {
 }
 
 func TestBuildDevModeJSON_NoInferenceGatewayApiKey(t *testing.T) {
-	out, err := buildDevModeJSON(devTestGateway, devTestHelper, devTestProfile)
+	out, err := buildDevModeJSON(devTestGateway, devTestHelper, devTestProfile, "")
 	if err != nil {
 		t.Fatalf("buildDevModeJSON: %v", err)
 	}
@@ -571,7 +571,7 @@ func TestBuildDevModeJSON_TtlIs55(t *testing.T) {
 func TestBuildDevModeJSON_PreservesPaths(t *testing.T) {
 	gateway := "https://example.com/anthropic?a=1&b=2"
 	helper := "/Applications/Foo Bar/databricks-claude-credential-helper"
-	out, err := buildDevModeJSON(gateway, helper, "my-profile")
+	out, err := buildDevModeJSON(gateway, helper, "my-profile", "")
 	if err != nil {
 		t.Fatalf("buildDevModeJSON: %v", err)
 	}
@@ -595,7 +595,7 @@ func TestInferenceModelsConsistencyAcrossArtifacts(t *testing.T) {
 	helper := "/path/to/helper"
 
 	// JSON: models array elements should byte-equal the constant elements.
-	devOut, err := buildDevModeJSON(gateway, helper, "DEFAULT")
+	devOut, err := buildDevModeJSON(gateway, helper, "DEFAULT", "")
 	if err != nil {
 		t.Fatalf("buildDevModeJSON: %v", err)
 	}
@@ -629,7 +629,7 @@ func TestInferenceModelsConsistencyAcrossArtifacts(t *testing.T) {
 
 	// Mobileconfig: extract the <string>...</string> body for inferenceModels
 	// and reverse plistEscape; should equal inferenceModelsJSON verbatim.
-	mc, err := buildMobileconfig(gateway, helper, "DEFAULT")
+	mc, err := buildMobileconfig(gateway, helper, "DEFAULT", "")
 	if err != nil {
 		t.Fatalf("buildMobileconfig: %v", err)
 	}
@@ -640,7 +640,7 @@ func TestInferenceModelsConsistencyAcrossArtifacts(t *testing.T) {
 	}
 
 	// Reg: extract the inferenceModels="..." value and reverse regEscape.
-	reg := buildRegFile(gateway, helper, "DEFAULT")
+	reg := buildRegFile(gateway, helper, "DEFAULT", "")
 	regModels := extractRegModels(t, reg)
 	regUnescaped := unescapeReg(regModels)
 	if regUnescaped != inferenceModelsJSON {
@@ -769,7 +769,7 @@ func TestWriteFileAtomic_RenamesFromTempInSameDir(t *testing.T) {
 func TestWriteDesktopConfigByPath_JsonExtension(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "out.json")
-	if err := writeDesktopConfigByPath(target, "https://x.example.com/anthropic", "/bin/h", "DEFAULT"); err != nil {
+	if err := writeDesktopConfigByPath(target, "https://x.example.com/anthropic", "/bin/h", "DEFAULT", ""); err != nil {
 		t.Fatalf("writeDesktopConfigByPath: %v", err)
 	}
 	raw, err := os.ReadFile(target)
@@ -808,7 +808,7 @@ func TestGuardDevJSONOutputPath_Empty(t *testing.T) {
 func TestGuardDevJSONOutputPath_OurOwnConfig(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "ours.json")
-	body, err := buildDevModeJSON("https://x", "/bin/h", "DEFAULT")
+	body, err := buildDevModeJSON("https://x", "/bin/h", "DEFAULT", "")
 	if err != nil {
 		t.Fatalf("buildDevModeJSON: %v", err)
 	}
@@ -848,5 +848,96 @@ func TestGuardDevJSONOutputPath_NotJSON(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), p) {
 		t.Errorf("error must mention the path %q, got %v", p, err)
+	}
+}
+
+// ---- databricksCliPath emission tests ----------------------------------------
+
+const testCliPath = "/opt/databricks/bin/databricks"
+
+func TestBuildMobileconfig_CliPath_Present(t *testing.T) {
+	out, err := buildMobileconfig("https://x.example.com/anthropic", "/bin/h", "myws", testCliPath)
+	if err != nil {
+		t.Fatalf("buildMobileconfig: %v", err)
+	}
+	if !strings.Contains(out, "<key>databricksCliPath</key>") {
+		t.Error("mobileconfig with cliPath must contain <key>databricksCliPath</key>")
+	}
+	if !strings.Contains(out, "<string>"+testCliPath+"</string>") {
+		t.Errorf("mobileconfig must contain <string>%s</string>", testCliPath)
+	}
+}
+
+func TestBuildMobileconfig_CliPath_Absent(t *testing.T) {
+	out, err := buildMobileconfig("https://x.example.com/anthropic", "/bin/h", "myws", "")
+	if err != nil {
+		t.Fatalf("buildMobileconfig: %v", err)
+	}
+	if strings.Contains(out, "databricksCliPath") {
+		t.Error("mobileconfig without cliPath must NOT contain databricksCliPath")
+	}
+}
+
+func TestBuildMobileconfig_CliPath_Escaped(t *testing.T) {
+	cliPath := "/opt/foo & bar/databricks"
+	out, err := buildMobileconfig("https://x.example.com/anthropic", "/bin/h", "myws", cliPath)
+	if err != nil {
+		t.Fatalf("buildMobileconfig: %v", err)
+	}
+	if strings.Contains(out, "foo & bar") {
+		t.Error("cliPath ampersand must be plist-escaped in mobileconfig")
+	}
+	if !strings.Contains(out, "foo &amp; bar") {
+		t.Error("expected plist-escaped cliPath with &amp;")
+	}
+}
+
+func TestBuildRegFile_CliPath_Present(t *testing.T) {
+	out := buildRegFile("https://x.example.com/anthropic", "/bin/h", "myws", testCliPath)
+	if !strings.Contains(out, `"databricksCliPath"="`+testCliPath+`"`) {
+		t.Errorf(".reg with cliPath must contain %q", `"databricksCliPath"="`+testCliPath+`"`)
+	}
+}
+
+func TestBuildRegFile_CliPath_Absent(t *testing.T) {
+	out := buildRegFile("https://x.example.com/anthropic", "/bin/h", "myws", "")
+	if strings.Contains(out, "databricksCliPath") {
+		t.Error(".reg without cliPath must NOT contain databricksCliPath")
+	}
+}
+
+func TestBuildRegFile_CliPath_Escaped(t *testing.T) {
+	cliPath := `C:\Program Files\Databricks\databricks.exe`
+	out := buildRegFile("https://x.example.com/anthropic", "/bin/h", "myws", cliPath)
+	if !strings.Contains(out, `"databricksCliPath"="C:\\Program Files\\Databricks\\databricks.exe"`) {
+		t.Errorf(".reg cliPath backslashes not escaped; got:\n%s", out)
+	}
+}
+
+func TestBuildDevModeJSON_CliPath_Present(t *testing.T) {
+	out, err := buildDevModeJSON("https://x.example.com/anthropic", "/bin/h", "myws", testCliPath)
+	if err != nil {
+		t.Fatalf("buildDevModeJSON: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got, ok := m["databricksCliPath"].(string)
+	if !ok {
+		t.Fatalf("databricksCliPath not a string in dev JSON (got %T = %v)", m["databricksCliPath"], m["databricksCliPath"])
+	}
+	if got != testCliPath {
+		t.Errorf("databricksCliPath = %q, want %q", got, testCliPath)
+	}
+}
+
+func TestBuildDevModeJSON_CliPath_Absent(t *testing.T) {
+	out, err := buildDevModeJSON("https://x.example.com/anthropic", "/bin/h", "myws", "")
+	if err != nil {
+		t.Fatalf("buildDevModeJSON: %v", err)
+	}
+	if strings.Contains(string(out), "databricksCliPath") {
+		t.Error("dev JSON without cliPath must NOT contain databricksCliPath key")
 	}
 }

@@ -88,7 +88,7 @@ func TestParsePlistString_MultipleKeys(t *testing.T) {
 }
 
 func TestReadPlistFile_NotExist(t *testing.T) {
-	v, err := readPlistFile("/nonexistent/path/to/file.plist")
+	v, err := readPlistFile("/nonexistent/path/to/file.plist", "databricksProfile")
 	if err != nil {
 		t.Fatalf("expected nil error for non-existent file, got %v", err)
 	}
@@ -176,5 +176,111 @@ func TestRead_NoPlistReturnsEmpty(t *testing.T) {
 	}
 	if got != "" {
 		t.Errorf("Read = %q, want empty string when no plist found", got)
+	}
+}
+
+// writePlistMultiKey writes a minimal Apple plist containing two key=value pairs.
+func writePlistMultiKey(t *testing.T, dir, domain string, pairs [][2]string) string {
+	t.Helper()
+	var entries string
+	for _, p := range pairs {
+		entries += "\t<key>" + p[0] + "</key>\n\t<string>" + p[1] + "</string>\n"
+	}
+	content := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+` + entries + `</dict>
+</plist>
+`
+	path := filepath.Join(dir, domain+".plist")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("writePlistMultiKey: %v", err)
+	}
+	return path
+}
+
+func TestReadKey_DatabricksCliPath(t *testing.T) {
+	dir := t.TempDir()
+	writePlistMultiKey(t, dir, testDomain, [][2]string{
+		{"databricksProfile", "my-profile"},
+		{"databricksCliPath", "/opt/databricks/bin/databricks"},
+	})
+
+	origManagedPrefsDir := managedPrefsDir
+	managedPrefsDir = func() string { return dir }
+	defer func() { managedPrefsDir = origManagedPrefsDir }()
+
+	got, err := ReadKey(testDomain, "databricksCliPath")
+	if err != nil {
+		t.Fatalf("ReadKey: %v", err)
+	}
+	if got != "/opt/databricks/bin/databricks" {
+		t.Errorf("ReadKey databricksCliPath = %q, want /opt/databricks/bin/databricks", got)
+	}
+}
+
+func TestReadKey_MultipleKeys_EachResolvedIndependently(t *testing.T) {
+	dir := t.TempDir()
+	writePlistMultiKey(t, dir, testDomain, [][2]string{
+		{"databricksProfile", "fleet-profile"},
+		{"databricksCliPath", "/usr/local/bin/databricks"},
+	})
+
+	origManagedPrefsDir := managedPrefsDir
+	managedPrefsDir = func() string { return dir }
+	defer func() { managedPrefsDir = origManagedPrefsDir }()
+
+	profile, err := ReadKey(testDomain, "databricksProfile")
+	if err != nil {
+		t.Fatalf("ReadKey profile: %v", err)
+	}
+	if profile != "fleet-profile" {
+		t.Errorf("ReadKey profile = %q, want fleet-profile", profile)
+	}
+
+	cliPath, err := ReadKey(testDomain, "databricksCliPath")
+	if err != nil {
+		t.Fatalf("ReadKey cliPath: %v", err)
+	}
+	if cliPath != "/usr/local/bin/databricks" {
+		t.Errorf("ReadKey cliPath = %q, want /usr/local/bin/databricks", cliPath)
+	}
+}
+
+func TestReadKey_AbsentKeyReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	writePlist(t, dir, testDomain, "databricksProfile", "some-profile")
+
+	origManagedPrefsDir := managedPrefsDir
+	managedPrefsDir = func() string { return dir }
+	defer func() { managedPrefsDir = origManagedPrefsDir }()
+
+	got, err := ReadKey(testDomain, "databricksCliPath")
+	if err != nil {
+		t.Fatalf("ReadKey: %v", err)
+	}
+	if got != "" {
+		t.Errorf("ReadKey missing key = %q, want empty string", got)
+	}
+}
+
+func TestRead_ShimCallsReadKeyForDatabricksProfile(t *testing.T) {
+	dir := t.TempDir()
+	writePlistMultiKey(t, dir, testDomain, [][2]string{
+		{"databricksProfile", "shim-profile"},
+		{"databricksCliPath", "/some/path"},
+	})
+
+	origManagedPrefsDir := managedPrefsDir
+	managedPrefsDir = func() string { return dir }
+	defer func() { managedPrefsDir = origManagedPrefsDir }()
+
+	got, err := Read(testDomain)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got != "shim-profile" {
+		t.Errorf("Read = %q, want shim-profile (shim must return databricksProfile)", got)
 	}
 }

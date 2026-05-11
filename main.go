@@ -19,9 +19,11 @@ import (
 	"time"
 
 	"github.com/IceRhymers/databricks-claude/pkg/authcheck"
+	"github.com/IceRhymers/databricks-claude/pkg/cli"
 	"github.com/IceRhymers/databricks-claude/pkg/completion"
 	"github.com/IceRhymers/databricks-claude/pkg/health"
 	"github.com/IceRhymers/databricks-claude/pkg/lifecycle"
+	"github.com/IceRhymers/databricks-claude/pkg/mdmprofile"
 	"github.com/IceRhymers/databricks-claude/pkg/portbind"
 	"github.com/IceRhymers/databricks-claude/pkg/proxy"
 	"github.com/IceRhymers/databricks-claude/pkg/refcount"
@@ -107,6 +109,14 @@ func main() {
 		}
 		os.Exit(0)
 	}
+
+	// Wire the MDM reader so ResolveDatabricksCLI can consult the MDM-managed
+	// databricksCliPath key. Hoisted ABOVE the early-exit branches so all
+	// entry points (credential-helper alias, `desktop`, `setup`, and the
+	// normal proxy flow) see the real reader before any code path can call
+	// ResolveDatabricksCLI. The logger remains helper-specific (wired inside
+	// runCredentialHelper) since only the helper has a debug-log surface.
+	cli.SetMDMReader(mdmprofile.ReadKey)
 
 	// argv[0] alias `databricks-claude-credential-helper` — Desktop's
 	// mobileconfig accepts only a path with no arguments; install methods

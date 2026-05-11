@@ -20,12 +20,43 @@ var FallbackCLIDirs = []string{
 	"bin",        // resolved against $HOME
 }
 
+// MDMReader is a function that reads a string value from MDM managed
+// preferences. Takes a domain and key, returns the value or empty string.
+type MDMReader func(domain, key string) (string, error)
+
+// mdmReader is the package-level injection point. Default is a no-op so
+// pkg/cli remains independently importable without a hard dep on
+// pkg/mdmprofile. main.go wires the real mdmprofile.ReadKey at startup.
+var mdmReader MDMReader = func(_, _ string) (string, error) { return "", nil }
+
+// SetMDMReader replaces the package-level MDM reader. Call once at startup
+// with mdmprofile.ReadKey; no-op if r is nil.
+func SetMDMReader(r MDMReader) {
+	if r != nil {
+		mdmReader = r
+	}
+}
+
+// mdmLogger is called when the MDM tier fires during CLI resolution.
+// Default is a no-op; wire helperDebugLog via SetMDMLogger to surface
+// resolution steps in the credential-helper log.
+var mdmLogger func(format string, args ...any) = func(string, ...any) {}
+
+// SetMDMLogger replaces the package-level MDM logger. No-op if logger is nil.
+func SetMDMLogger(logger func(format string, args ...any)) {
+	if logger != nil {
+		mdmLogger = logger
+	}
+}
+
 // ResolveDatabricksCLI returns an executable path for cmdName.
 // Lookup order:
 //  1. Absolute or path-qualified cmdName → returned unchanged (back-compat for tests).
 //  2. $DATABRICKS_CLI env override, if set and executable.
-//  3. exec.LookPath(cmdName), which honors the inherited PATH.
-//  4. A scan of common install dirs (FallbackCLIDirs).
+//  3. MDM managed preference (com.icerhymers.databricks-claude / databricksCliPath),
+//     if set and executable. Admin-pinned value beats accidental PATH discovery.
+//  4. exec.LookPath(cmdName), which honors the inherited PATH.
+//  5. A scan of common install dirs (FallbackCLIDirs).
 //
 // If none match, cmdName is returned unchanged so the eventual exec error
 // surfaces with its original message.
@@ -40,6 +71,14 @@ func ResolveDatabricksCLI(cmdName string) string {
 		if IsExecutableFile(override) {
 			return override
 		}
+	}
+	// MDM tier — admin-pinned path from com.icerhymers.databricks-claude domain.
+	if mdmPath, err := mdmReader("com.icerhymers.databricks-claude", "databricksCliPath"); err == nil && mdmPath != "" {
+		if IsExecutableFile(mdmPath) {
+			mdmLogger("MDM databricksCliPath=%q used", mdmPath)
+			return mdmPath
+		}
+		mdmLogger("MDM databricksCliPath=%q not executable, falling through", mdmPath)
 	}
 	if p, err := exec.LookPath(cmdName); err == nil {
 		return p

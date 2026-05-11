@@ -19,15 +19,14 @@ var (
 	procRegQueryValueExW = modAdvapi32.NewProc("RegQueryValueExW")
 )
 
-// Read returns the value of the "databricksProfile" registry value under
+// ReadKey returns the value of the given registry value name under
 // HKCU\SOFTWARE\IceRhymers\databricks-claude.
 // The domain argument is accepted for API symmetry with other platforms but
 // is not used — all endpoint configuration is stored under the single key
 // above, which matches the HKCU path written by the .reg artifact.
 // Returns "" on any error (key absent, value missing, etc.).
-func Read(_ string) (string, error) {
+func ReadKey(_ string, valueName string) (string, error) {
 	const subKey = `SOFTWARE\IceRhymers\databricks-claude`
-	const valueName = "databricksProfile"
 
 	subKeyPtr, err := syscall.UTF16PtrFromString(subKey)
 	if err != nil {
@@ -59,6 +58,13 @@ func Read(_ string) (string, error) {
 		return "", nil
 	}
 	return syscall.UTF16ToString(buf), nil
+}
+
+// Read returns the value of the "databricksProfile" registry value under
+// HKCU\SOFTWARE\IceRhymers\databricks-claude.
+// Shim over ReadKey for backwards compatibility.
+func Read(_ string) (string, error) {
+	return ReadKey("", "databricksProfile")
 }
 
 // regQueryValueExW is a thin wrapper around RegQueryValueExW so that the

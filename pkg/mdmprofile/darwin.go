@@ -21,15 +21,15 @@ var managedPrefsDir = func() string {
 	return filepath.Join("/Library/Managed Preferences", u.Username)
 }
 
-// Read returns the value of the "databricksProfile" key from the MDM-managed
-// plist for the given domain (e.g. "com.icerhymers.databricks-claude").
-// Checks the managed preferences directory first (written by MDM on enrolled
-// devices), then falls back to ~/Library/Preferences for unmanaged dev/test
-// machines. Returns "" on any read or parse error.
-func Read(domain string) (string, error) {
+// ReadKey returns the value of the given key from the MDM-managed plist for
+// the given domain (e.g. "com.icerhymers.databricks-claude"). Checks the
+// managed preferences directory first (written by MDM on enrolled devices),
+// then falls back to ~/Library/Preferences for unmanaged dev/test machines.
+// Returns "" on any read or parse error.
+func ReadKey(domain, key string) (string, error) {
 	// 1. MDM-managed preferences (requires device enrollment).
 	managed := filepath.Join(managedPrefsDir(), domain+".plist")
-	if v, err := readPlistFile(managed); err == nil && v != "" {
+	if v, err := readPlistFile(managed, key); err == nil && v != "" {
 		return v, nil
 	}
 
@@ -39,17 +39,22 @@ func Read(domain string) (string, error) {
 		return "", nil
 	}
 	unmanaged := filepath.Join(home, "Library", "Preferences", domain+".plist")
-	if v, err := readPlistFile(unmanaged); err == nil && v != "" {
+	if v, err := readPlistFile(unmanaged, key); err == nil && v != "" {
 		return v, nil
 	}
 
 	return "", nil
 }
 
+// Read returns the value of the "databricksProfile" key from the MDM-managed
+// plist for the given domain. Shim over ReadKey for backwards compatibility.
+func Read(domain string) (string, error) {
+	return ReadKey(domain, "databricksProfile")
+}
+
 // readPlistFile reads a plist XML file and returns the string value of the
-// "databricksProfile" top-level key. Returns ("", nil) when the file does not
-// exist or the key is absent.
-func readPlistFile(path string) (string, error) {
+// given key. Returns ("", nil) when the file does not exist or the key is absent.
+func readPlistFile(path, key string) (string, error) {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return "", nil
@@ -57,7 +62,7 @@ func readPlistFile(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return parsePlistString(data, "databricksProfile")
+	return parsePlistString(data, key)
 }
 
 // parsePlistString walks Apple plist XML tokens seeking the first

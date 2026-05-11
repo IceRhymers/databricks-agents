@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/IceRhymers/databricks-claude/pkg/authcheck"
+	"github.com/IceRhymers/databricks-claude/pkg/cli"
 	"github.com/IceRhymers/databricks-claude/pkg/mdmprofile"
 )
 
@@ -216,6 +217,12 @@ func resolveCredHelperProfile(profile string) string {
 // Profile resolution: explicit --profile flag > saved state file (skipping the
 // "DEFAULT" sentinel) > MDM managed preferences > "DEFAULT".
 func runCredentialHelper(profile string) {
+	// Wire the helper-specific MDM logger so the resolution chain's per-tier
+	// outcomes land in ~/Library/Logs/databricks-claude/credential-helper.log.
+	// The reader itself is wired in main.go above the early-exit dispatchers,
+	// so it's already populated by the time we get here.
+	cli.SetMDMLogger(helperDebugLog)
+
 	// Suppress all stdlib logging so the upstream tokencache cannot leak
 	// anything onto stderr while Claude Desktop is watching.
 	log.SetOutput(io.Discard)
@@ -354,7 +361,7 @@ func runGenerateDesktopConfig(profile, outputPath, binaryPathOverride, databrick
 	}
 
 	if outputPath != "" {
-		if err := writeDesktopConfigByPath(outputPath, gatewayURL, helperPath, resolved); err != nil {
+		if err := writeDesktopConfigByPath(outputPath, gatewayURL, helperPath, resolved, databricksCLIPath); err != nil {
 			fmt.Fprintf(os.Stderr, "databricks-claude: %v\n", err)
 			os.Exit(1)
 		}
@@ -378,19 +385,19 @@ func runGenerateDesktopConfig(profile, outputPath, binaryPathOverride, databrick
 		path    string
 		content []byte
 	}
-	mc, err := buildMobileconfig(gatewayURL, helperPath, resolved)
+	mc, err := buildMobileconfig(gatewayURL, helperPath, resolved, databricksCLIPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "databricks-claude: %v\n", err)
 		os.Exit(1)
 	}
-	dev, err := buildDevModeJSON(gatewayURL, helperPath, resolved)
+	dev, err := buildDevModeJSON(gatewayURL, helperPath, resolved, databricksCLIPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "databricks-claude: %v\n", err)
 		os.Exit(1)
 	}
 	arts := []artifact{
 		{"databricks-claude-desktop.mobileconfig", []byte(mc)},
-		{"databricks-claude-desktop.reg", []byte(buildRegFile(gatewayURL, helperPath, resolved))},
+		{"databricks-claude-desktop.reg", []byte(buildRegFile(gatewayURL, helperPath, resolved, databricksCLIPath))},
 		{"databricks-claude-desktop.json", dev},
 	}
 	wrote := []string{}
@@ -444,29 +451,29 @@ func resolveHelperPath(override string, forPkg bool) (string, error) {
 // host OS when no recognised extension is present) and writes to outputPath
 // atomically. For .json outputs, guardDevJSONOutputPath protects against
 // accidentally clobbering ~/.claude/settings.json via a typo.
-func writeDesktopConfigByPath(outputPath, gatewayURL, exe, profile string) error {
+func writeDesktopConfigByPath(outputPath, gatewayURL, exe, profile, cliPath string) error {
 	lower := strings.ToLower(outputPath)
 	var data []byte
 	var err error
 	switch {
 	case strings.HasSuffix(lower, ".mobileconfig"):
 		var s string
-		s, err = buildMobileconfig(gatewayURL, exe, profile)
+		s, err = buildMobileconfig(gatewayURL, exe, profile, cliPath)
 		data = []byte(s)
 	case strings.HasSuffix(lower, ".reg"):
-		data = []byte(buildRegFile(gatewayURL, exe, profile))
+		data = []byte(buildRegFile(gatewayURL, exe, profile, cliPath))
 	case strings.HasSuffix(lower, ".json"):
 		if err := guardDevJSONOutputPath(outputPath); err != nil {
 			return err
 		}
-		data, err = buildDevModeJSON(gatewayURL, exe, profile)
+		data, err = buildDevModeJSON(gatewayURL, exe, profile, cliPath)
 	default:
 		// Fall back to host platform.
 		if runtime.GOOS == "windows" {
-			data = []byte(buildRegFile(gatewayURL, exe, profile))
+			data = []byte(buildRegFile(gatewayURL, exe, profile, cliPath))
 		} else {
 			var s string
-			s, err = buildMobileconfig(gatewayURL, exe, profile)
+			s, err = buildMobileconfig(gatewayURL, exe, profile, cliPath)
 			data = []byte(s)
 		}
 	}
@@ -552,9 +559,9 @@ func newUUID() (string, error) {
 // buildMobileconfig renders the macOS Claude Desktop Configuration Profile.
 // Three distinct UUIDs are generated: one for the Anthropic payload, one for
 // the IceRhymers/databricks-claude payload, and one for the outer profile.
-// The second payload carries databricksProfile so endpoint helpers can
-// resolve the correct workspace on machines where no state file exists.
-func buildMobileconfig(gatewayURL, helperPath, profile string) (string, error) {
+// The second payload carries databricksProfile (and databricksCliPath when
+// non-empty) so endpoint helpers can resolve their inputs without a state file.
+func buildMobileconfig(gatewayURL, helperPath, profile, cliPath string) (string, error) {
 	innerUUID, err := newUUID()
 	if err != nil {
 		return "", err
@@ -566,6 +573,11 @@ func buildMobileconfig(gatewayURL, helperPath, profile string) (string, error) {
 	outerUUID, err := newUUID()
 	if err != nil {
 		return "", err
+	}
+
+	cliPathXML := ""
+	if cliPath != "" {
+		cliPathXML = "\n\t\t\t\t<key>databricksCliPath</key>\n\t\t\t\t<string>" + plistEscape(cliPath) + "</string>"
 	}
 
 	return `<?xml version="1.0" encoding="UTF-8"?>
@@ -630,7 +642,7 @@ func buildMobileconfig(gatewayURL, helperPath, profile string) (string, error) {
 				<key>PayloadDisplayName</key>
 				<string>Databricks Claude Settings</string>
 				<key>databricksProfile</key>
-				<string>` + plistEscape(profile) + `</string>
+				<string>` + plistEscape(profile) + `</string>` + cliPathXML + `
 			</dict>
 		</array>
 		<key>PayloadDisplayName</key>
@@ -664,7 +676,7 @@ func plistEscape(s string) string {
 	return r.Replace(s)
 }
 
-func buildRegFile(gatewayURL, helperPath, profile string) string {
+func buildRegFile(gatewayURL, helperPath, profile, cliPath string) string {
 	// .reg uses CRLF line endings and a UTF-16-or-UTF-8-with-BOM header.
 	// Plain UTF-8 with the documented header works on modern Windows.
 	var b strings.Builder
@@ -686,11 +698,14 @@ func buildRegFile(gatewayURL, helperPath, profile string) string {
 	b.WriteString(`"disableEssentialTelemetry"=dword:00000000` + "\r\n")
 	b.WriteString(`"disableNonessentialTelemetry"=dword:00000000` + "\r\n")
 	b.WriteString(`"disableNonessentialServices"=dword:00000000` + "\r\n")
-	// IceRhymers/databricks-claude key: carries the Databricks profile so
-	// the credential helper on endpoint machines can resolve it without a
-	// state file.
+	// IceRhymers/databricks-claude key: carries Databricks profile and CLI
+	// path so the credential helper on endpoint machines can resolve them
+	// without a state file.
 	b.WriteString("\r\n[HKEY_CURRENT_USER\\SOFTWARE\\IceRhymers\\databricks-claude]\r\n")
 	fmt.Fprintf(&b, "\"databricksProfile\"=\"%s\"\r\n", regEscape(profile))
+	if cliPath != "" {
+		fmt.Fprintf(&b, "\"databricksCliPath\"=\"%s\"\r\n", regEscape(cliPath))
+	}
 	return b.String()
 }
 
@@ -712,7 +727,7 @@ func buildRegFile(gatewayURL, helperPath, profile string) string {
 //
 // inferenceModels is reused from inferenceModelsJSON via []json.RawMessage so
 // the model list never drifts between the three artifacts.
-func buildDevModeJSON(gatewayURL, helperPath, profile string) ([]byte, error) {
+func buildDevModeJSON(gatewayURL, helperPath, profile, cliPath string) ([]byte, error) {
 	var models []json.RawMessage
 	if err := json.Unmarshal([]byte(inferenceModelsJSON), &models); err != nil {
 		return nil, fmt.Errorf("inferenceModelsJSON is malformed: %w", err)
@@ -720,6 +735,7 @@ func buildDevModeJSON(gatewayURL, helperPath, profile string) ([]byte, error) {
 
 	cfg := struct {
 		DatabricksProfile                   string            `json:"databricksProfile"`
+		DatabricksCliPath                   string            `json:"databricksCliPath,omitempty"`
 		DisableDeploymentModeChooser        bool              `json:"disableDeploymentModeChooser"`
 		InferenceProvider                   string            `json:"inferenceProvider"`
 		InferenceGatewayBaseUrl             string            `json:"inferenceGatewayBaseUrl"`
@@ -738,6 +754,7 @@ func buildDevModeJSON(gatewayURL, helperPath, profile string) ([]byte, error) {
 		DisableNonessentialServices         bool              `json:"disableNonessentialServices"`
 	}{
 		DatabricksProfile:                   profile,
+		DatabricksCliPath:                   cliPath,
 		DisableDeploymentModeChooser:        true,
 		InferenceProvider:                   "gateway",
 		InferenceGatewayBaseUrl:             gatewayURL,
