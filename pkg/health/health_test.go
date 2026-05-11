@@ -65,4 +65,3 @@ func TestProxyHealthy_SchemeMismatch(t *testing.T) {
 		t.Error("expected ProxyHealthy to return false for HTTP server checked with https scheme")
 	}
 }
-

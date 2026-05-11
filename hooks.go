@@ -155,4 +155,3 @@ func isDBXHookEntry(entry interface{}) bool {
 	}
 	return false
 }
-

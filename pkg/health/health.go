@@ -26,4 +26,3 @@ func ProxyHealthy(port int, scheme string) bool {
 	resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
 }
-

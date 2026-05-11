@@ -34,43 +34,43 @@ var Version = "dev"
 
 // Args holds all parsed command-line arguments for databricks-claude.
 type Args struct {
-	Profile             string
-	Verbose             bool
-	Version             bool
-	ShowHelp            bool
-	PrintEnv            bool
-	OTEL                bool
-	OTELMetricsTable    string
-	OTELMetricsTableSet bool
-	OTELLogsTable       string
-	OTELLogsTableSet    bool
-	OTELTraces          bool
-	OTELTracesTable     string
-	OTELTracesTableSet  bool
-	Upstream            string
-	LogFile             string
-	NoOTEL              bool
-	NoOTELMetrics       bool
-	NoOTELLogs          bool
-	NoOTELTraces        bool
-	ProxyAPIKey         string
-	TLSCert             string
-	TLSKey              string
-	Port                int
-	Headless            bool
-	IdleTimeout         time.Duration
-	InstallHooks        bool
-	UninstallHooks      bool
-	HeadlessEnsure      bool
-	HeadlessRelease     bool
-	NoUpdateCheck       bool
-	WithWebSearch          bool
-	WithWebSearchSet       bool
-	WebSearchBackend       string
-	WebSearchBackendSet    bool
-	WebSearchFetchBudget   int
+	Profile                 string
+	Verbose                 bool
+	Version                 bool
+	ShowHelp                bool
+	PrintEnv                bool
+	OTEL                    bool
+	OTELMetricsTable        string
+	OTELMetricsTableSet     bool
+	OTELLogsTable           string
+	OTELLogsTableSet        bool
+	OTELTraces              bool
+	OTELTracesTable         string
+	OTELTracesTableSet      bool
+	Upstream                string
+	LogFile                 string
+	NoOTEL                  bool
+	NoOTELMetrics           bool
+	NoOTELLogs              bool
+	NoOTELTraces            bool
+	ProxyAPIKey             string
+	TLSCert                 string
+	TLSKey                  string
+	Port                    int
+	Headless                bool
+	IdleTimeout             time.Duration
+	InstallHooks            bool
+	UninstallHooks          bool
+	HeadlessEnsure          bool
+	HeadlessRelease         bool
+	NoUpdateCheck           bool
+	WithWebSearch           bool
+	WithWebSearchSet        bool
+	WebSearchBackend        string
+	WebSearchBackendSet     bool
+	WebSearchFetchBudget    int
 	WebSearchFetchBudgetSet bool
-	ClaudeArgs          []string
+	ClaudeArgs              []string
 }
 
 func main() {
@@ -122,6 +122,14 @@ func main() {
 	// flags don't pollute the root flag namespace.
 	if len(os.Args) >= 2 && os.Args[1] == "desktop" {
 		runDesktopCommand(os.Args[2:])
+		return
+	}
+
+	// `setup` subcommand — idempotent auth bootstrap for fleet init scripts.
+	// Resolves + persists the profile, then runs `databricks auth login` when
+	// not already authenticated (or always, with --force).
+	if len(os.Args) >= 2 && os.Args[1] == "setup" {
+		runSetupCommand(os.Args[2:])
 		return
 	}
 
@@ -759,7 +767,6 @@ func main() {
 	os.Exit(exitCode)
 }
 
-
 // runHeadless runs the proxy without launching a claude child process.
 // It prints the proxy URL to stdout, then blocks until SIGINT/SIGTERM
 // or until doneCh is closed (by /shutdown or idle timeout).
@@ -784,7 +791,6 @@ func runHeadless(proxyURL string, ln net.Listener, isOwner bool, refcountPath st
 		ln.Close()
 	}
 }
-
 
 // envBlock returns the "env" sub-map from a settings document, or an empty map.
 func envBlock(doc map[string]interface{}) map[string]interface{} {
@@ -1063,6 +1069,10 @@ Subcommands:
   update                       Check for a newer release and print upgrade instructions
   desktop <action>             Claude Desktop integration. Run 'databricks-claude desktop'
                                for actions (generate-config, credential-helper) and flags.
+  setup [flags]                Idempotent auth bootstrap. Persists the profile to state and
+                               runs 'databricks auth login' when not authenticated. Designed
+                               for fleet init scripts and per-user login agents.
+                               Run 'databricks-claude setup --help' for flags.
 
 Example Unity Catalog table setup (run in a Databricks SQL warehouse):
 
@@ -1110,7 +1120,6 @@ func buildUpdaterConfig() updater.Config {
 		CacheTTL:       24 * time.Hour,
 	}
 }
-
 
 // handlePrintEnv prints resolved configuration with the token redacted.
 func handlePrintEnv(profile, databricksHost, anthropicBaseURL, token, upstreamBinary string, otelEnabled bool, otelMetricsTable, otelLogsTable, otelTracesTable string) {
@@ -1214,7 +1223,6 @@ func writePersistentConfig(path string, cfg map[string]interface{}) error {
 	}
 	return os.Rename(tmpPath, path)
 }
-
 
 // deriveLogsTable derives the OTEL logs table name from the metrics table name.
 // If the metrics table ends with "_otel_metrics", replace that suffix with "_otel_logs".

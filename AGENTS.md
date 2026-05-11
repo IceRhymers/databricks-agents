@@ -20,6 +20,7 @@ Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth t
 | `databrickscfg.go` | Reads `~/.databrickscfg` section headers for profile completion |
 | `desktop_config.go` | `desktop` subcommand: `generate-config` writing `.mobileconfig`, `.reg`, and `.json` artifacts for Claude Desktop; credential-helper alias dispatch |
 | `desktop_trust.go` | `generate-trust-profile` subcommand for MDM trust profile generation |
+| `setup.go` | `setup` subcommand: idempotent auth bootstrap for fleet init scripts — resolves and persists the profile, then runs `databricks auth login` if not already authenticated (or always with `--force`) |
 | `desktop_config_test.go` | Tests for `buildMobileconfig`, `buildRegFile`, `buildDevModeJSON`, `writeDesktopConfigByPath`, `guardDevJSONOutputPath`, `writeFileAtomic`, install-instruction routing, and model-list consistency across all three artifacts |
 | `main_test.go` | Tests for `parseArgs`, `handlePrintEnv`, persistent config, `deriveLogsTable`, full integration scenarios |
 | `process_test.go` | Tests for `RunChild`, signal forwarding, exit code propagation |
@@ -37,6 +38,7 @@ Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth t
 | Directory | Purpose |
 |-----------|---------|
 | `pkg/` | Reusable library packages extracted from the monolithic main (see `pkg/AGENTS.md`) |
+| `pkg/mdmprofile/` | Platform-specific readers for MDM-managed preferences (darwin: plist, windows: registry, other: stub). Used by the credential helper to resolve the Databricks profile on endpoint machines. |
 | `.github/` | GitHub Actions CI configuration (see `.github/AGENTS.md`) |
 | `.claude/` | Claude Code project configuration (settings only, no AGENTS.md needed) |
 

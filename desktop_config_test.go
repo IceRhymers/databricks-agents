@@ -38,7 +38,7 @@ func TestNewUUID_FormatAndUniqueness(t *testing.T) {
 func TestBuildMobileconfig_ContainsRequiredKeys(t *testing.T) {
 	gateway := "https://adb-abc-123.azuredatabricks.net/ai-gateway/anthropic"
 	helper := "/usr/local/bin/databricks-claude"
-	out, err := buildMobileconfig(gateway, helper)
+	out, err := buildMobileconfig(gateway, helper, "myws")
 	if err != nil {
 		t.Fatalf("buildMobileconfig: %v", err)
 	}
@@ -62,9 +62,29 @@ func TestBuildMobileconfig_ContainsRequiredKeys(t *testing.T) {
 		`<key>disableEssentialTelemetry</key>`,
 		`<key>disableNonessentialTelemetry</key>`,
 		`<key>disableNonessentialServices</key>`,
+		// Second payload: our own domain.
+		`<string>com.icerhymers.databricks-claude</string>`,
+		`<key>databricksProfile</key>`,
+		`<string>myws</string>`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("mobileconfig missing %q", want)
+		}
+	}
+}
+
+func TestBuildMobileconfig_SecondPayload(t *testing.T) {
+	out, err := buildMobileconfig("https://x.example.com/anthropic", "/bin/h", "fleet-profile")
+	if err != nil {
+		t.Fatalf("buildMobileconfig: %v", err)
+	}
+	for _, want := range []string{
+		`<string>com.icerhymers.databricks-claude</string>`,
+		`<key>databricksProfile</key>`,
+		`<string>fleet-profile</string>`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("mobileconfig second payload missing %q\nfull output:\n%s", want, out)
 		}
 	}
 }
@@ -73,7 +93,7 @@ func TestBuildMobileconfig_EscapesSpecialChars(t *testing.T) {
 	// Gateway URL with an ampersand should be plist-escaped.
 	gateway := "https://example.com/anthropic?a=1&b=2"
 	helper := "/Applications/Foo & Bar/databricks-claude"
-	out, err := buildMobileconfig(gateway, helper)
+	out, err := buildMobileconfig(gateway, helper, "DEFAULT")
 	if err != nil {
 		t.Fatalf("buildMobileconfig: %v", err)
 	}
@@ -89,24 +109,29 @@ func TestBuildMobileconfig_EscapesSpecialChars(t *testing.T) {
 }
 
 func TestBuildMobileconfig_UniqueUUIDs(t *testing.T) {
-	out, err := buildMobileconfig("https://x", "/bin/x")
+	out, err := buildMobileconfig("https://x", "/bin/x", "DEFAULT")
 	if err != nil {
 		t.Fatalf("buildMobileconfig: %v", err)
 	}
 	uuidsRe := regexp.MustCompile(`<string>([0-9A-F]{8}-[0-9A-F]{4}-4[0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12})</string>`)
 	matches := uuidsRe.FindAllStringSubmatch(out, -1)
-	if len(matches) != 2 {
-		t.Fatalf("expected exactly 2 UUIDs in mobileconfig, got %d", len(matches))
+	// Three UUIDs: Anthropic payload, IceRhymers payload, outer profile.
+	if len(matches) != 3 {
+		t.Fatalf("expected exactly 3 UUIDs in mobileconfig, got %d", len(matches))
 	}
-	if matches[0][1] == matches[1][1] {
-		t.Errorf("inner and outer UUIDs must differ, got %q for both", matches[0][1])
+	seen := map[string]bool{}
+	for _, m := range matches {
+		if seen[m[1]] {
+			t.Errorf("duplicate UUID %q in mobileconfig", m[1])
+		}
+		seen[m[1]] = true
 	}
 }
 
 func TestBuildRegFile_ContainsRequiredKeys(t *testing.T) {
 	gateway := "https://adb-abc-123.azuredatabricks.net/ai-gateway/anthropic"
 	helper := `C:\Program Files\databricks-claude\databricks-claude.exe`
-	out := buildRegFile(gateway, helper)
+	out := buildRegFile(gateway, helper, "fleet-ws")
 
 	for _, want := range []string{
 		`Windows Registry Editor Version 5.00`,
@@ -123,6 +148,9 @@ func TestBuildRegFile_ContainsRequiredKeys(t *testing.T) {
 		`"disableEssentialTelemetry"=dword:00000000`,
 		`"disableNonessentialTelemetry"=dword:00000000`,
 		`"disableNonessentialServices"=dword:00000000`,
+		// IceRhymers key carrying databricksProfile.
+		`[HKEY_CURRENT_USER\SOFTWARE\IceRhymers\databricks-claude]`,
+		`"databricksProfile"="fleet-ws"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf(".reg missing %q", want)
@@ -147,11 +175,11 @@ func TestBuildRegFile_ContainsRequiredKeys(t *testing.T) {
 
 func TestRegEscape(t *testing.T) {
 	cases := map[string]string{
-		`plain`:                      `plain`,
-		`with "quotes"`:              `with \"quotes\"`,
-		`C:\path\to\bin`:             `C:\\path\\to\\bin`,
-		`"quote at start`:            `\"quote at start`,
-		`back\slash and "quote"`:     `back\\slash and \"quote\"`,
+		`plain`:                  `plain`,
+		`with "quotes"`:          `with \"quotes\"`,
+		`C:\path\to\bin`:         `C:\\path\\to\\bin`,
+		`"quote at start`:        `\"quote at start`,
+		`back\slash and "quote"`: `back\\slash and \"quote\"`,
 	}
 	for in, want := range cases {
 		if got := regEscape(in); got != want {
@@ -162,11 +190,11 @@ func TestRegEscape(t *testing.T) {
 
 func TestPlistEscape(t *testing.T) {
 	cases := map[string]string{
-		`plain`:           `plain`,
-		`a & b`:           `a &amp; b`,
-		`<tag>`:           `&lt;tag&gt;`,
-		`he said "hi"`:    `he said &quot;hi&quot;`,
-		`it's & <ok>`:     `it&apos;s &amp; &lt;ok&gt;`,
+		`plain`:        `plain`,
+		`a & b`:        `a &amp; b`,
+		`<tag>`:        `&lt;tag&gt;`,
+		`he said "hi"`: `he said &quot;hi&quot;`,
+		`it's & <ok>`:  `it&apos;s &amp; &lt;ok&gt;`,
 	}
 	for in, want := range cases {
 		if got := plistEscape(in); got != want {
@@ -421,9 +449,11 @@ const (
 	devTestHelper  = "/usr/local/bin/databricks-claude-credential-helper"
 )
 
+const devTestProfile = "test-profile"
+
 func decodeDevJSON(t *testing.T) map[string]any {
 	t.Helper()
-	out, err := buildDevModeJSON(devTestGateway, devTestHelper)
+	out, err := buildDevModeJSON(devTestGateway, devTestHelper, devTestProfile)
 	if err != nil {
 		t.Fatalf("buildDevModeJSON: %v", err)
 	}
@@ -459,6 +489,7 @@ func TestBuildDevModeJSON_ContainsRequiredKeys(t *testing.T) {
 		}
 	}
 	wantStr := map[string]string{
+		"databricksProfile":          devTestProfile,
 		"inferenceProvider":          "gateway",
 		"inferenceGatewayBaseUrl":    devTestGateway,
 		"inferenceGatewayAuthScheme": "bearer",
@@ -477,7 +508,7 @@ func TestBuildDevModeJSON_ContainsRequiredKeys(t *testing.T) {
 }
 
 func TestBuildDevModeJSON_ValidJSONAndTrailingNewline(t *testing.T) {
-	out, err := buildDevModeJSON(devTestGateway, devTestHelper)
+	out, err := buildDevModeJSON(devTestGateway, devTestHelper, devTestProfile)
 	if err != nil {
 		t.Fatalf("buildDevModeJSON: %v", err)
 	}
@@ -491,7 +522,7 @@ func TestBuildDevModeJSON_ValidJSONAndTrailingNewline(t *testing.T) {
 }
 
 func TestBuildDevModeJSON_NoInferenceGatewayApiKey(t *testing.T) {
-	out, err := buildDevModeJSON(devTestGateway, devTestHelper)
+	out, err := buildDevModeJSON(devTestGateway, devTestHelper, devTestProfile)
 	if err != nil {
 		t.Fatalf("buildDevModeJSON: %v", err)
 	}
@@ -540,7 +571,7 @@ func TestBuildDevModeJSON_TtlIs55(t *testing.T) {
 func TestBuildDevModeJSON_PreservesPaths(t *testing.T) {
 	gateway := "https://example.com/anthropic?a=1&b=2"
 	helper := "/Applications/Foo Bar/databricks-claude-credential-helper"
-	out, err := buildDevModeJSON(gateway, helper)
+	out, err := buildDevModeJSON(gateway, helper, "my-profile")
 	if err != nil {
 		t.Fatalf("buildDevModeJSON: %v", err)
 	}
@@ -564,7 +595,7 @@ func TestInferenceModelsConsistencyAcrossArtifacts(t *testing.T) {
 	helper := "/path/to/helper"
 
 	// JSON: models array elements should byte-equal the constant elements.
-	devOut, err := buildDevModeJSON(gateway, helper)
+	devOut, err := buildDevModeJSON(gateway, helper, "DEFAULT")
 	if err != nil {
 		t.Fatalf("buildDevModeJSON: %v", err)
 	}
@@ -598,7 +629,7 @@ func TestInferenceModelsConsistencyAcrossArtifacts(t *testing.T) {
 
 	// Mobileconfig: extract the <string>...</string> body for inferenceModels
 	// and reverse plistEscape; should equal inferenceModelsJSON verbatim.
-	mc, err := buildMobileconfig(gateway, helper)
+	mc, err := buildMobileconfig(gateway, helper, "DEFAULT")
 	if err != nil {
 		t.Fatalf("buildMobileconfig: %v", err)
 	}
@@ -609,7 +640,7 @@ func TestInferenceModelsConsistencyAcrossArtifacts(t *testing.T) {
 	}
 
 	// Reg: extract the inferenceModels="..." value and reverse regEscape.
-	reg := buildRegFile(gateway, helper)
+	reg := buildRegFile(gateway, helper, "DEFAULT")
 	regModels := extractRegModels(t, reg)
 	regUnescaped := unescapeReg(regModels)
 	if regUnescaped != inferenceModelsJSON {
@@ -700,7 +731,7 @@ func TestWriteFileAtomic_RenamesFromTempInSameDir(t *testing.T) {
 func TestWriteDesktopConfigByPath_JsonExtension(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "out.json")
-	if err := writeDesktopConfigByPath(target, "https://x.example.com/anthropic", "/bin/h"); err != nil {
+	if err := writeDesktopConfigByPath(target, "https://x.example.com/anthropic", "/bin/h", "DEFAULT"); err != nil {
 		t.Fatalf("writeDesktopConfigByPath: %v", err)
 	}
 	raw, err := os.ReadFile(target)
@@ -739,7 +770,7 @@ func TestGuardDevJSONOutputPath_Empty(t *testing.T) {
 func TestGuardDevJSONOutputPath_OurOwnConfig(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "ours.json")
-	body, err := buildDevModeJSON("https://x", "/bin/h")
+	body, err := buildDevModeJSON("https://x", "/bin/h", "DEFAULT")
 	if err != nil {
 		t.Fatalf("buildDevModeJSON: %v", err)
 	}

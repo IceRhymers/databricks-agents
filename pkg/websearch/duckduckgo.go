@@ -137,10 +137,10 @@ func decodeDDGRedirect(u string) string {
 }
 
 var (
-	tagRe          = regexp.MustCompile(`<[^>]+>`)
-	whitespaceRe   = regexp.MustCompile(`\s+`)
-	scriptStyleRe  = regexp.MustCompile(`(?is)<(script|style)\b[^>]*>.*?</\s*(script|style)\s*>`)
-	htmlEntities   = strings.NewReplacer("&amp;", "&", "&lt;", "<", "&gt;", ">", "&quot;", `"`, "&#39;", "'", "&apos;", "'", "&nbsp;", " ")
+	tagRe         = regexp.MustCompile(`<[^>]+>`)
+	whitespaceRe  = regexp.MustCompile(`\s+`)
+	scriptStyleRe = regexp.MustCompile(`(?is)<(script|style)\b[^>]*>.*?</\s*(script|style)\s*>`)
+	htmlEntities  = strings.NewReplacer("&amp;", "&", "&lt;", "<", "&gt;", ">", "&quot;", `"`, "&#39;", "'", "&apos;", "'", "&nbsp;", " ")
 )
 
 func stripTags(s string) string {

@@ -616,4 +616,3 @@ func isJSONResponse(resp *http.Response) bool {
 	first := strings.ToLower(strings.TrimSpace(strings.SplitN(ct, ";", 2)[0]))
 	return first == "application/json" || strings.HasSuffix(first, "+json")
 }
-

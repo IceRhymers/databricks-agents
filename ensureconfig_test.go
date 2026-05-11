@@ -117,8 +117,8 @@ func TestClearOTELKeysSubset(t *testing.T) {
 			"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://127.0.0.1:49153/otel",
 			"OTEL_EXPORTER_OTLP_METRICS_HEADERS":  "Authorization=Bearer token",
 			"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/protobuf",
-			"OTEL_METRIC_EXPORT_INTERVAL":          "60000",
-			"CLAUDE_OTEL_UC_METRICS_TABLE":         "catalog.schema.metrics",
+			"OTEL_METRIC_EXPORT_INTERVAL":         "60000",
+			"CLAUDE_OTEL_UC_METRICS_TABLE":        "catalog.schema.metrics",
 			// Unrelated keys (must survive).
 			"ANTHROPIC_BASE_URL":   "http://127.0.0.1:49153",
 			"ANTHROPIC_AUTH_TOKEN": "proxy-managed",
@@ -432,9 +432,9 @@ func TestPruneStaleProxyEntries_OTELEndpoint(t *testing.T) {
 	initial := map[string]interface{}{
 		"env": map[string]interface{}{
 			"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": fmt.Sprintf("http://127.0.0.1:%d", deadPort),
-			"CLAUDE_OTEL_UC_METRICS_TABLE":         "catalog.schema.metrics",
-			"OTEL_METRICS_EXPORTER":                "otlp",
-			"OTEL_METRIC_EXPORT_INTERVAL":          "60000",
+			"CLAUDE_OTEL_UC_METRICS_TABLE":        "catalog.schema.metrics",
+			"OTEL_METRICS_EXPORTER":               "otlp",
+			"OTEL_METRIC_EXPORT_INTERVAL":         "60000",
 		},
 	}
 	data, _ := json.MarshalIndent(initial, "", "  ")

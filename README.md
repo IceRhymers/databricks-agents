@@ -209,6 +209,42 @@ The packaging method (`.pkg` installer, custom `brew` formula, etc.) is responsi
 
 For fleet rollout via MDM using the signed `.pkg` installer, see [MDM deployment with signed `.pkg`](#mdm-deployment-with-signed-pkg-self-signed) below.
 
+#### Fleet rollout — per-user init script
+
+After your MDM policy deploys `databricks-claude.pkg` and the workspace `.mobileconfig`, run this user-scope init script (e.g. as a Jamf policy or Intune Win32 app triggered at login):
+
+```bash
+#!/bin/bash
+PROFILE="databricks-ai-inference"
+HOST="https://my-ai-workspace.cloud.databricks.com"
+databricks auth login --host "$HOST" --profile "$PROFILE"
+/usr/local/bin/databricks-claude setup --profile "$PROFILE"
+```
+
+`generate-config --for-pkg --profile databricks-ai-inference` bakes the same profile into the `.mobileconfig`'s `com.icerhymers.databricks-claude` MDM payload. The credential helper reads this payload on first launch — so if the user opens Claude Desktop before the init script runs, the helper can still resolve the correct workspace via MDM without a local state file.
+
+The `setup` subcommand is idempotent: re-running it when the user is already authenticated prints "Already authenticated" and exits 0. Use `--force` to re-run the browser login regardless.
+
+#### How recovery works
+
+Databricks OAuth refresh tokens live roughly 24 hours. When a token expires, Claude Desktop's next 55-second re-poll fires the credential helper. The helper recovers automatically:
+
+1. Tries `databricks auth token --profile <resolved>` — fails (token expired).
+2. Calls `databricks auth login --profile <resolved>` with the subprocess's stdout routed to stderr (Desktop's stdout watch is preserved). A browser window opens.
+3. The user completes the SSO flow (~30–60 seconds on a fast IdP).
+4. The helper retries `databricks auth token` — succeeds, emits the fresh token to stdout.
+5. Claude Desktop resumes with a fresh token.
+
+If the user takes more than 55 seconds to complete SSO, Desktop's TTL fires again. On the retry, the token cache is freshly warm and the second invocation is instant.
+
+To warm the cache proactively and avoid the browser-at-first-launch surprise:
+
+```bash
+/usr/local/bin/databricks-claude setup --profile databricks-ai-inference
+```
+
+This is what the fleet init script above does — running it before the user opens Desktop ensures the first credential-helper invocation hits the fast-path and returns a token without a browser prompt.
+
 ### MDM deployment with signed `.pkg` (self-signed)
 
 > **Audience**: any admin rolling out Claude Desktop + Databricks AI Gateway to their workforce via MDM (Jamf, Kandji, Intune, etc.). This repo is a template — fork it, set your org's signing identity, and ship signed `.pkg`s to your managed Macs. The `.pkg` is signed with a self-signed certificate that is only trusted on endpoints where the matching trust profile has been deployed via MDM. For unmanaged Macs, use the Homebrew tap.
@@ -320,6 +356,46 @@ echo 'alias claude="databricks-claude"' >> ~/.zshrc  # or ~/.bashrc
 ```
 
 Claude Desktop integration lives under the `desktop` subcommand — run `databricks-claude desktop` for its action list and flags.
+
+## `setup` Subcommand
+
+Idempotent auth bootstrap. Persists the active profile to `~/.claude/.databricks-claude.json` and runs `databricks auth login` only when the profile isn't already authenticated. Safe to re-run on every login — designed for fleet init scripts and per-user LaunchAgents / login-trigger scripts.
+
+```bash
+# First-time bootstrap on a new endpoint:
+databricks-claude setup \
+  --profile databricks-ai-inference \
+  --host https://my-ai-workspace.cloud.databricks.com
+
+# Idempotent re-run (no-op when authed) — safe in a LaunchAgent:
+databricks-claude setup --profile databricks-ai-inference
+
+# Force a re-login (switched workspaces, or revoked the old token):
+databricks-claude setup --profile databricks-ai-inference --force
+```
+
+| Flag | Purpose |
+|------|---------|
+| `--profile NAME` | Databricks CLI profile to bootstrap (default: saved state > `"DEFAULT"`) |
+| `--host URL` | Workspace URL, forwarded verbatim to `databricks auth login --host` on first login |
+| `--force` | Always re-run `databricks auth login` even when already authenticated |
+| `--help`, `-h` | Show subcommand help |
+
+**Behaviour:**
+
+1. Resolve profile (flag → saved state → `"DEFAULT"`) and persist it to the state file so subsequent `databricks-claude` invocations (including the Claude Desktop credential helper) pick it up.
+2. If already authenticated for that profile and `--force` was not passed: print a success line and exit 0 without spawning a browser.
+3. Otherwise exec `databricks auth login --profile X [--host Y]` with attached stdin/stdout/stderr (interactive browser OAuth flow).
+4. Re-check authentication. Exit 0 on success, non-zero on failure.
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Already authenticated, or login succeeded |
+| 1 | State write failed, auth login failed, or still unauthenticated after login |
+
+`setup` is the same auth flow the credential helper uses for daily token recovery — running it proactively in a fleet init script keeps users from seeing the recovery browser tab on their first Claude Desktop launch.
 
 ## Headless Mode
 

@@ -3,6 +3,7 @@ package authcheck
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -29,12 +30,15 @@ func IsAuthenticated(profile, cmdName string) bool {
 	return strings.Contains(string(out), "access_token")
 }
 
-// EnsureAuthenticated verifies the user has a valid token for the profile.
-// If not authenticated, it runs "<cmdName> auth login --profile <profile>"
-// interactively (attaches stdin/stdout/stderr so the browser OAuth flow works).
-// Returns nil if authentication succeeds, error if it fails even after login.
-// cmdName is the Databricks CLI binary name or path; pass "" to use the default ("databricks").
-func EnsureAuthenticated(profile, cmdName string) error {
+// EnsureAuthenticatedWithStdout verifies the user has a valid token for the
+// profile. If not authenticated, it runs "<cmdName> auth login --profile
+// <profile>" interactively; the login subprocess's stdout is written to w
+// (e.g. os.Stderr or a bytes.Buffer) rather than the caller's stdout.
+// This lets callers that own their stdout for another protocol (e.g. the
+// credential helper emitting a bare token) capture or suppress the login
+// subprocess's output without leaking it.
+// cmdName is the Databricks CLI binary name or path; pass "" to use the default.
+func EnsureAuthenticatedWithStdout(profile, cmdName string, w io.Writer) error {
 	if IsAuthenticated(profile, cmdName) {
 		return nil
 	}
@@ -42,7 +46,7 @@ func EnsureAuthenticated(profile, cmdName string) error {
 	fmt.Fprintf(os.Stderr, "databricks: not authenticated for profile %q, opening browser login...\n", profile)
 	cmd := execCommand(resolved, "auth", "login", "--profile", profile)
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = w
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("databricks auth login failed: %w", err)
@@ -51,4 +55,13 @@ func EnsureAuthenticated(profile, cmdName string) error {
 		return fmt.Errorf("still not authenticated for profile %q after login attempt", profile)
 	}
 	return nil
+}
+
+// EnsureAuthenticated verifies the user has a valid token for the profile.
+// It is a thin shim over EnsureAuthenticatedWithStdout that routes the login
+// subprocess stdout to os.Stdout — the same behaviour as before this variant
+// was introduced, preserving backward compatibility for all existing callers.
+// cmdName is the Databricks CLI binary name or path; pass "" to use the default.
+func EnsureAuthenticated(profile, cmdName string) error {
+	return EnsureAuthenticatedWithStdout(profile, cmdName, os.Stdout)
 }

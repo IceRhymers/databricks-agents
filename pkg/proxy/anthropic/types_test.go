@@ -47,7 +47,7 @@ func TestIsWebSearchTool(t *testing.T) {
 		`{"type":"web_search_99999999","name":"web_search"}`: true,
 		`{"type":"web_fetch_20250910","name":"web_fetch"}`:   false,
 		`{"type":"custom","name":"x"}`:                       false,
-		`{}`: false,
+		`{}`:                                                 false,
 	}
 	for in, want := range cases {
 		if got := IsWebSearchTool([]byte(in)); got != want {

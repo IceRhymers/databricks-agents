@@ -13,6 +13,9 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/IceRhymers/databricks-claude/pkg/authcheck"
+	"github.com/IceRhymers/databricks-claude/pkg/mdmprofile"
 )
 
 // helperDebugLog appends a single diagnostic line to
@@ -193,6 +196,16 @@ func runCredentialHelper(profile string) {
 	resolved := profile
 	if resolved == "" && state.Profile != "" {
 		resolved = state.Profile
+		helperDebugLog("profile from state file=%q", resolved)
+	}
+	if resolved == "" {
+		// Check MDM-managed preferences before falling back to DEFAULT.
+		// On darwin this reads /Library/Managed Preferences/<user>/com.icerhymers.databricks-claude.plist;
+		// on windows it reads HKCU\SOFTWARE\IceRhymers\databricks-claude\databricksProfile.
+		if mdmProfile, err := mdmprofile.Read("com.icerhymers.databricks-claude"); err == nil && mdmProfile != "" {
+			resolved = mdmProfile
+			helperDebugLog("profile from MDM=%q", resolved)
+		}
 	}
 	if resolved == "" {
 		resolved = "DEFAULT"
@@ -202,11 +215,27 @@ func runCredentialHelper(profile string) {
 	// state.DatabricksCLIPath ("" → fall through to PATH/fallback scan in
 	// resolveDatabricksCLI) overrides the default "databricks" lookup.
 	tp := NewTokenProvider(resolved, state.DatabricksCLIPath)
+	helperDebugLog("tp.Token first attempt profile=%q", resolved)
 	tok, err := tp.Token(context.Background())
 	if err != nil {
-		helperDebugLog("FAIL profile=%q err=%v", resolved, err)
-		fmt.Fprintf(os.Stderr, "databricks-claude: credential helper failed: %v\n", err)
-		os.Exit(1)
+		helperDebugLog("tp.Token first attempt FAIL profile=%q err=%v — invoking EnsureAuthenticated", resolved, err)
+		// Route login subprocess stdout to our stderr so Desktop's bare-token
+		// contract on our stdout is preserved.
+		if authErr := authcheck.EnsureAuthenticatedWithStdout(resolved, state.DatabricksCLIPath, os.Stderr); authErr != nil {
+			helperDebugLog("EnsureAuthenticated FAIL profile=%q err=%v", resolved, authErr)
+			fmt.Fprintf(os.Stderr, "databricks-claude: credential helper authentication failed: %v\n", authErr)
+			os.Exit(1)
+		}
+		helperDebugLog("tp.Token retry profile=%q", resolved)
+		tok, err = tp.Token(context.Background())
+		if err != nil {
+			helperDebugLog("tp.Token retry FAIL profile=%q err=%v", resolved, err)
+			fmt.Fprintf(os.Stderr, "databricks-claude: credential helper failed after re-authentication: %v\n", err)
+			os.Exit(1)
+		}
+		helperDebugLog("tp.Token retry OK profile=%q", resolved)
+	} else {
+		helperDebugLog("tp.Token first attempt OK profile=%q", resolved)
 	}
 	tok = strings.TrimSpace(tok)
 	if tok == "" {
@@ -260,6 +289,18 @@ func runGenerateDesktopConfig(profile, outputPath, binaryPathOverride, databrick
 		resolved = "DEFAULT"
 	}
 
+	// Persist resolved profile so subsequent local databricks-claude invocations
+	// on the generating machine (without --profile) use the same workspace.
+	{
+		st := loadState()
+		if st.Profile != resolved {
+			st.Profile = resolved
+			if err := saveState(st); err != nil {
+				fmt.Fprintf(os.Stderr, "databricks-claude: warning: failed to persist profile to state: %v\n", err)
+			}
+		}
+	}
+
 	// Validate and persist the databricks-cli-path BEFORE network calls so a
 	// bad path fails fast.
 	if databricksCLIPath != "" {
@@ -296,7 +337,7 @@ func runGenerateDesktopConfig(profile, outputPath, binaryPathOverride, databrick
 	}
 
 	if outputPath != "" {
-		if err := writeDesktopConfigByPath(outputPath, gatewayURL, helperPath); err != nil {
+		if err := writeDesktopConfigByPath(outputPath, gatewayURL, helperPath, resolved); err != nil {
 			fmt.Fprintf(os.Stderr, "databricks-claude: %v\n", err)
 			os.Exit(1)
 		}
@@ -320,19 +361,19 @@ func runGenerateDesktopConfig(profile, outputPath, binaryPathOverride, databrick
 		path    string
 		content []byte
 	}
-	mc, err := buildMobileconfig(gatewayURL, helperPath)
+	mc, err := buildMobileconfig(gatewayURL, helperPath, resolved)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "databricks-claude: %v\n", err)
 		os.Exit(1)
 	}
-	dev, err := buildDevModeJSON(gatewayURL, helperPath)
+	dev, err := buildDevModeJSON(gatewayURL, helperPath, resolved)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "databricks-claude: %v\n", err)
 		os.Exit(1)
 	}
 	arts := []artifact{
 		{"databricks-claude-desktop.mobileconfig", []byte(mc)},
-		{"databricks-claude-desktop.reg", []byte(buildRegFile(gatewayURL, helperPath))},
+		{"databricks-claude-desktop.reg", []byte(buildRegFile(gatewayURL, helperPath, resolved))},
 		{"databricks-claude-desktop.json", dev},
 	}
 	wrote := []string{}
@@ -386,29 +427,29 @@ func resolveHelperPath(override string, forPkg bool) (string, error) {
 // host OS when no recognised extension is present) and writes to outputPath
 // atomically. For .json outputs, guardDevJSONOutputPath protects against
 // accidentally clobbering ~/.claude/settings.json via a typo.
-func writeDesktopConfigByPath(outputPath, gatewayURL, exe string) error {
+func writeDesktopConfigByPath(outputPath, gatewayURL, exe, profile string) error {
 	lower := strings.ToLower(outputPath)
 	var data []byte
 	var err error
 	switch {
 	case strings.HasSuffix(lower, ".mobileconfig"):
 		var s string
-		s, err = buildMobileconfig(gatewayURL, exe)
+		s, err = buildMobileconfig(gatewayURL, exe, profile)
 		data = []byte(s)
 	case strings.HasSuffix(lower, ".reg"):
-		data = []byte(buildRegFile(gatewayURL, exe))
+		data = []byte(buildRegFile(gatewayURL, exe, profile))
 	case strings.HasSuffix(lower, ".json"):
 		if err := guardDevJSONOutputPath(outputPath); err != nil {
 			return err
 		}
-		data, err = buildDevModeJSON(gatewayURL, exe)
+		data, err = buildDevModeJSON(gatewayURL, exe, profile)
 	default:
 		// Fall back to host platform.
 		if runtime.GOOS == "windows" {
-			data = []byte(buildRegFile(gatewayURL, exe))
+			data = []byte(buildRegFile(gatewayURL, exe, profile))
 		} else {
 			var s string
-			s, err = buildMobileconfig(gatewayURL, exe)
+			s, err = buildMobileconfig(gatewayURL, exe, profile)
 			data = []byte(s)
 		}
 	}
@@ -492,10 +533,16 @@ func newUUID() (string, error) {
 }
 
 // buildMobileconfig renders the macOS Claude Desktop Configuration Profile.
-// Two distinct UUIDs are generated: one for the inner payload, one for the
-// outer profile wrapper.
-func buildMobileconfig(gatewayURL, helperPath string) (string, error) {
+// Three distinct UUIDs are generated: one for the Anthropic payload, one for
+// the IceRhymers/databricks-claude payload, and one for the outer profile.
+// The second payload carries databricksProfile so endpoint helpers can
+// resolve the correct workspace on machines where no state file exists.
+func buildMobileconfig(gatewayURL, helperPath, profile string) (string, error) {
 	innerUUID, err := newUUID()
+	if err != nil {
+		return "", err
+	}
+	ourUUID, err := newUUID()
 	if err != nil {
 		return "", err
 	}
@@ -554,6 +601,20 @@ func buildMobileconfig(gatewayURL, helperPath string) (string, error) {
 				<key>disableNonessentialServices</key>
 				<false/>
 			</dict>
+			<dict>
+				<key>PayloadType</key>
+				<string>com.icerhymers.databricks-claude</string>
+				<key>PayloadIdentifier</key>
+				<string>com.icerhymers.databricks-claude.settings</string>
+				<key>PayloadUUID</key>
+				<string>` + ourUUID + `</string>
+				<key>PayloadVersion</key>
+				<integer>1</integer>
+				<key>PayloadDisplayName</key>
+				<string>Databricks Claude Settings</string>
+				<key>databricksProfile</key>
+				<string>` + plistEscape(profile) + `</string>
+			</dict>
 		</array>
 		<key>PayloadDisplayName</key>
 		<string>Claude Desktop Third-Party Inference</string>
@@ -586,9 +647,7 @@ func plistEscape(s string) string {
 	return r.Replace(s)
 }
 
-// buildRegFile renders a Windows .reg script that writes the Claude Desktop
-// MDM keys under HKCU\SOFTWARE\Policies\Claude.
-func buildRegFile(gatewayURL, helperPath string) string {
+func buildRegFile(gatewayURL, helperPath, profile string) string {
 	// .reg uses CRLF line endings and a UTF-16-or-UTF-8-with-BOM header.
 	// Plain UTF-8 with the documented header works on modern Windows.
 	var b strings.Builder
@@ -610,6 +669,11 @@ func buildRegFile(gatewayURL, helperPath string) string {
 	b.WriteString(`"disableEssentialTelemetry"=dword:00000000` + "\r\n")
 	b.WriteString(`"disableNonessentialTelemetry"=dword:00000000` + "\r\n")
 	b.WriteString(`"disableNonessentialServices"=dword:00000000` + "\r\n")
+	// IceRhymers/databricks-claude key: carries the Databricks profile so
+	// the credential helper on endpoint machines can resolve it without a
+	// state file.
+	b.WriteString("\r\n[HKEY_CURRENT_USER\\SOFTWARE\\IceRhymers\\databricks-claude]\r\n")
+	fmt.Fprintf(&b, "\"databricksProfile\"=\"%s\"\r\n", regEscape(profile))
 	return b.String()
 }
 
@@ -631,13 +695,14 @@ func buildRegFile(gatewayURL, helperPath string) string {
 //
 // inferenceModels is reused from inferenceModelsJSON via []json.RawMessage so
 // the model list never drifts between the three artifacts.
-func buildDevModeJSON(gatewayURL, helperPath string) ([]byte, error) {
+func buildDevModeJSON(gatewayURL, helperPath, profile string) ([]byte, error) {
 	var models []json.RawMessage
 	if err := json.Unmarshal([]byte(inferenceModelsJSON), &models); err != nil {
 		return nil, fmt.Errorf("inferenceModelsJSON is malformed: %w", err)
 	}
 
 	cfg := struct {
+		DatabricksProfile                   string            `json:"databricksProfile"`
 		DisableDeploymentModeChooser        bool              `json:"disableDeploymentModeChooser"`
 		InferenceProvider                   string            `json:"inferenceProvider"`
 		InferenceGatewayBaseUrl             string            `json:"inferenceGatewayBaseUrl"`
@@ -655,6 +720,7 @@ func buildDevModeJSON(gatewayURL, helperPath string) ([]byte, error) {
 		DisableNonessentialTelemetry        bool              `json:"disableNonessentialTelemetry"`
 		DisableNonessentialServices         bool              `json:"disableNonessentialServices"`
 	}{
+		DatabricksProfile:                   profile,
 		DisableDeploymentModeChooser:        true,
 		InferenceProvider:                   "gateway",
 		InferenceGatewayBaseUrl:             gatewayURL,
