@@ -333,6 +333,122 @@ func TestServe_StdoutSilence_HelpPath(t *testing.T) {
 	}
 }
 
+// TestServe_SubSubcommandHelp_RoutesCorrectly verifies that
+// `serve install --help`, `serve uninstall --help`, and `serve status --help`
+// each reach their sub-subcommand-specific help function — NOT the parent
+// `printServeHelp` via the --help short-circuit. Regression guard for the
+// bug caught in PR #155 round-1 review: if `hasFlag(args, "--help")` fires
+// before the sub-subcommand dispatch in `runServe`, the install/uninstall/
+// status help is dead code on the user-facing path.
+//
+// **Sentinel choice matters.** The parent `printServeHelp` lists the three
+// sub-subcommand names in its "Sub-subcommands" section and "Examples"
+// section, so substrings like "serve install" appear in BOTH the parent help
+// AND the sub-subcommand help — a test that asserts those would still pass
+// under the regression. Each sentinel here is a line that appears ONLY in
+// the corresponding sub-subcommand help body, verified empirically against
+// `serve --help` output. If you adjust any of the help-text functions,
+// re-verify the sentinels stay unique to their respective help.
+func TestServe_SubSubcommandHelp_RoutesCorrectly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping subprocess build in -short mode")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "databricks-claude")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build binary: %v\n%s", err, out)
+	}
+
+	// Capture the parent `serve --help` body once so each sub-subcommand
+	// assertion can also verify its sentinel is absent from the parent —
+	// belt-and-suspenders against future help-text edits that accidentally
+	// leak a sentinel into both places.
+	parentCmd := exec.Command(bin, "serve", "--help")
+	var parentOut, parentErr bytes.Buffer
+	parentCmd.Stdout = &parentOut
+	parentCmd.Stderr = &parentErr
+	if err := parentCmd.Run(); err != nil {
+		t.Fatalf("serve --help: %v\nstderr=%q", err, parentErr.String())
+	}
+	parentBody := parentOut.String() + parentErr.String()
+
+	cases := []struct {
+		subcmd   string
+		sentinel string // a string that appears ONLY in this sub-subcommand's help, NOT in parent serve help
+	}{
+		{"install", "Service name: databricks-claude-daemon"},
+		{"uninstall", `Tolerates "not installed" gracefully.`},
+		{"status", "Registered — manifest/task/unit file exists"},
+	}
+	for _, c := range cases {
+		t.Run(c.subcmd, func(t *testing.T) {
+			// First confirm sentinel is genuinely unique — guards against
+			// help-text drift silently breaking the regression test.
+			if strings.Contains(parentBody, c.sentinel) {
+				t.Fatalf("sentinel %q for %q help leaked into parent serve --help body; pick a sentinel that appears ONLY in the sub-subcommand help", c.sentinel, c.subcmd)
+			}
+
+			cmd := exec.Command(bin, "serve", c.subcmd, "--help")
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("serve %s --help: %v\nstdout=%q\nstderr=%q", c.subcmd, err, stdout.String(), stderr.String())
+			}
+			combined := stdout.String() + stderr.String()
+			if !strings.Contains(combined, c.sentinel) {
+				t.Errorf("serve %s --help: output missing %q (sub-subcommand help did not route; parent serve help may be short-circuiting)\nstdout=%q\nstderr=%q",
+					c.subcmd, c.sentinel, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+// TestServe_Status_OutputGoesToStdout verifies that `serve status` writes
+// its result to REAL stdout, not stderr. The long-lived daemon path in
+// `runServe` reassigns `os.Stdout = os.Stderr` to protect the LaunchAgent
+// stdout log, but that redirect must NOT apply to one-shot user-facing
+// sub-subcommands. Regression guard for the bug caught in PR #155 round-1
+// review: if sub-subcommand dispatch happens AFTER the stdout redirect,
+// `serve status | grep Healthy` is broken in shipped binaries.
+//
+// `serve status` with no daemon registered returns an "all-no" result on
+// the current platform and exits with a documented non-zero code. We assert
+// the human-readable output lands on stdout regardless of the exit code.
+func TestServe_Status_OutputGoesToStdout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping subprocess build in -short mode")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "databricks-claude")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build binary: %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(bin, "serve", "status")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	// Don't fail on non-zero exit — `status` may exit non-zero when nothing
+	// is registered. We care about the stream the OUTPUT landed on.
+	_ = cmd.Run()
+
+	if stdout.Len() == 0 {
+		t.Errorf("serve status: expected human-readable output on stdout, got 0 bytes\nstderr=%q", stderr.String())
+	}
+	// Sanity: the output should mention the canonical service name.
+	if !strings.Contains(stdout.String(), "databricks-claude-daemon") {
+		t.Errorf("serve status stdout does not contain canonical service name; redirect may be misrouting\nstdout=%q\nstderr=%q",
+			stdout.String(), stderr.String())
+	}
+}
+
 // TestResolveTableFromChain_AllThreeSignals exercises the full resolution matrix
 // for each of metrics, logs, and traces independently.
 func TestResolveTableFromChain_AllThreeSignals(t *testing.T) {

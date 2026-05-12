@@ -59,10 +59,13 @@ var knownFlags = func() map[string]bool {
 
 // knownSubcommands is the authoritative list of top-level subcommands for shell
 // completion. They are offered as completions at position 1 (before any flags).
+// serve sub-subcommands (install/uninstall/status) are not listed here because
+// the current completion package only completes at position 1; they appear in
+// 'databricks-claude serve --help' instead.
 var knownSubcommands = []completion.SubcommandDef{
 	{Name: "completion", Description: "Generate shell completion scripts (bash, zsh, fish)"},
 	{Name: "update", Description: "Check for a newer release and print upgrade instructions"},
 	{Name: "desktop", Description: "Claude Desktop integration (generate-config, credential-helper)"},
 	{Name: "setup", Description: "Idempotent auth bootstrap for fleet init scripts"},
-	{Name: "serve", Description: "Long-lived daemon for MDM-deployed Claude Desktop deployments"},
+	{Name: "serve", Description: "Long-lived daemon; sub-subcommands: install, uninstall, status"},
 }

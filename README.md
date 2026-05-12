@@ -456,6 +456,45 @@ databricks-claude serve \
 
 **Port collision:** If port `49153` is unavailable at startup, `serve` prints the error and exits (unlike the CLI wrapper, which falls back to `:0`). The MDM-baked `gatewayBaseUrl` is a fixed URL that cannot follow a dynamic fallback. Stop the existing instance before restarting.
 
+### Installing as a background service
+
+Register the daemon as a per-user OS service so it starts automatically at login:
+
+| OS | One-liner |
+|----|-----------|
+| macOS | `databricks-claude serve install` |
+| Linux | `databricks-claude serve install` |
+| Windows | `databricks-claude serve install` |
+
+The install command writes a native service manifest and starts the daemon immediately:
+- **macOS:** LaunchAgent plist at `~/Library/LaunchAgents/databricks-claude-daemon.plist`
+- **Linux:** systemd user unit at `~/.config/systemd/user/databricks-claude-daemon.service`
+- **Windows:** Scheduled Task (logon trigger) via `schtasks.exe`
+
+Service name across all platforms: **`databricks-claude-daemon`**.
+
+Optional flags for `serve install`:
+- `--profile <name>` — Databricks profile to bake into the manifest
+- `--port <int>` — proxy port (default: 49153)
+- `--log-file <path>` — log file path (default: per-OS, e.g. `~/Library/Logs/databricks-claude-daemon/serve.log`)
+- `--otel-metrics-table`, `--otel-logs-table`, `--otel-traces-table` — OTEL UC tables
+
+#### Status / removal
+
+```bash
+# Check if the daemon is registered, running, and healthy:
+databricks-claude serve status
+
+# Remove the OS service registration (stops the daemon too):
+databricks-claude serve uninstall
+```
+
+**After a binary upgrade:** The manifest bakes in the binary path at install time. Re-run `serve install` after upgrading to refresh the path. `serve status` will warn if the manifest path doesn't match the current binary.
+
+> **macOS Gatekeeper note:** If your binary is unsigned or quarantined, `serve install` prints a one-line warning but the install still proceeds. To suppress the warning, run `xattr -dr com.apple.quarantine /path/to/databricks-claude` or sign the binary. The install is not blocked.
+
+> **Linux user-session note:** `systemd --user` services run inside your login session. If you log out, the daemon stops — it restarts automatically on your next login. This is correct behavior for interactive per-user deployments. If you want the daemon to survive all logouts, run `loginctl enable-linger` first (requires your admin's approval on managed devices). This is not done automatically.
+
 ## Headless Mode
 
 `--headless` starts the proxy without launching a `claude` child process, for use by IDE extensions and external tooling.

@@ -21,6 +21,11 @@ Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth t
 | `desktop_config.go` | `desktop` subcommand: `generate-config` writing `.mobileconfig`, `.reg`, and `.json` artifacts for Claude Desktop; credential-helper alias dispatch |
 | `desktop_trust.go` | `generate-trust-profile` subcommand for MDM trust profile generation |
 | `setup.go` | `setup` subcommand: idempotent auth bootstrap for fleet init scripts — resolves and persists the profile, then runs `databricks auth login` if not already authenticated (or always with `--force`) |
+| `serve_install.go` | Cross-platform dispatcher for `serve install`/`uninstall`/`status` sub-subcommands; flag parsing, binary resolution, status pretty-print |
+| `serve_install_darwin.go` | macOS LaunchAgent plist rendering and `launchctl` orchestration (build tag: `darwin`) |
+| `serve_install_linux.go` | Linux systemd user unit rendering and `systemctl --user` orchestration (build tag: `linux`) |
+| `serve_install_windows.go` | Windows Scheduled Task creation via `schtasks.exe` (build tag: `windows`) |
+| `serve_install_other.go` | Stub returning "unsupported platform" for non-darwin/linux/windows (build tag: `!darwin && !windows && !linux`) |
 | `desktop_config_test.go` | Tests for `buildMobileconfig`, `buildRegFile`, `buildDevModeJSON`, `writeDesktopConfigByPath`, `guardDevJSONOutputPath`, `writeFileAtomic`, install-instruction routing, and model-list consistency across all three artifacts |
 | `main_test.go` | Tests for `parseArgs`, `handlePrintEnv`, persistent config, `deriveLogsTable`, full integration scenarios |
 | `process_test.go` | Tests for `RunChild`, signal forwarding, exit code propagation |
@@ -28,6 +33,10 @@ Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth t
 | `token_test.go` | Tests using helper binaries compiled at test time to mock the `databricks` CLI |
 | `state_test.go` | Tests for persistent state load/save |
 | `hooks_test.go` | Tests for hook install/uninstall |
+| `serve_install_test.go` | Cross-platform tests for dispatcher, flag parsing, status pretty-print (no build tag) |
+| `serve_install_darwin_test.go` | macOS plist template rendering and `plutil -lint` validation (build tag: `darwin`) |
+| `serve_install_linux_test.go` | Linux systemd unit template rendering tests (build tag: `linux`) |
+| `serve_install_windows_test.go` | Windows schtasks `/TR` argument building tests (build tag: `windows`) |
 | `Makefile` | Build, install, test, cross-compile, lint targets |
 | `go.mod` | Module declaration (`github.com/IceRhymers/databricks-claude`, Go 1.22, zero deps) |
 | `CLAUDE.md` | Project-level AI agent instructions |

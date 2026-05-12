@@ -1092,13 +1092,17 @@ Subcommands:
                                runs 'databricks auth login' when not authenticated. Designed
                                for fleet init scripts and per-user login agents.
                                Run 'databricks-claude setup --help' for flags.
-  serve [flags]                Long-lived daemon serving Claude Code and Claude
+  serve [install|uninstall|status|flags]
+                               Long-lived daemon serving Claude Code and Claude
                                Desktop with persistent Databricks OAuth. Owns
                                OAuth refresh; exposes inference + OTLP on
                                127.0.0.1. No refcount, no /shutdown, append-only
                                logging. A third deployment mode alongside the
                                per-session CLI wrapper and SessionStart hooks.
+                               Sub-subcommands register the daemon as a per-user
+                               OS service (LaunchAgent/schtasks/systemd --user).
                                Run 'databricks-claude serve --help' for flags.
+                               Run 'databricks-claude serve install --help' etc.
 
 Example Unity Catalog table setup (run in a Databricks SQL warehouse):
 
