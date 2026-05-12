@@ -66,3 +66,11 @@ func (tp *TokenProvider) CachedToken() string {
 	defer tp.mu.Unlock()
 	return tp.cachedToken
 }
+
+// Expiry returns the cached token's expiry time.
+// Returns zero if no token has been fetched yet.
+func (tp *TokenProvider) Expiry() time.Time {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	return tp.expiresAt
+}

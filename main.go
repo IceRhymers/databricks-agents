@@ -79,7 +79,7 @@ func main() {
 	// completion <shell> — must be the very first check, before any flag parsing,
 	// auth, or state loading. Safe to call in the Homebrew install sandbox.
 	if len(os.Args) >= 2 && os.Args[1] == "completion" {
-		completion.Run(os.Args[2:], flagDefs, "databricks-claude")
+		completion.Run(os.Args[2:], flagDefs, "databricks-claude", knownSubcommands...)
 		os.Exit(0)
 	}
 
@@ -117,6 +117,15 @@ func main() {
 	// ResolveDatabricksCLI. The logger remains helper-specific (wired inside
 	// runCredentialHelper) since only the helper has a debug-log surface.
 	cli.SetMDMReader(mdmprofile.ReadKey)
+
+	// `serve` subcommand — long-lived daemon for MDM-deployed Claude Desktop
+	// deployments. Owns Databricks OAuth refresh; exposes inference + OTLP on
+	// 127.0.0.1. Distinguished from --headless: no refcount, no /shutdown route,
+	// append-only logging, daemon:true in /health.
+	if len(os.Args) >= 2 && os.Args[1] == "serve" {
+		runServe(os.Args[2:])
+		return
+	}
 
 	// argv[0] alias `databricks-claude-credential-helper` — Desktop's
 	// mobileconfig accepts only a path with no arguments; install methods
@@ -1083,6 +1092,13 @@ Subcommands:
                                runs 'databricks auth login' when not authenticated. Designed
                                for fleet init scripts and per-user login agents.
                                Run 'databricks-claude setup --help' for flags.
+  serve [flags]                Long-lived daemon serving Claude Code and Claude
+                               Desktop with persistent Databricks OAuth. Owns
+                               OAuth refresh; exposes inference + OTLP on
+                               127.0.0.1. No refcount, no /shutdown, append-only
+                               logging. A third deployment mode alongside the
+                               per-session CLI wrapper and SessionStart hooks.
+                               Run 'databricks-claude serve --help' for flags.
 
 Example Unity Catalog table setup (run in a Databricks SQL warehouse):
 

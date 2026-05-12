@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -772,4 +773,262 @@ func TestNewServer_InvalidOTELUpstream(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected non-nil error for invalid OTELUpstream, got nil")
 	}
+}
+
+// --- Daemon mode tests ---
+
+// TestProxy_Daemon_HealthReturnsDaemonTrue verifies that when Daemon=true,
+// GET /health returns a body containing daemon:true and the profile.
+func TestProxy_Daemon_HealthReturnsDaemonTrue(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	cfg := &Config{
+		InferenceUpstream: upstream.URL,
+		OTELUpstream:      upstream.URL,
+		TokenSource:       warmToken("tok"),
+		ToolName:          "databricks-claude",
+		Version:           "1.2.3",
+		Daemon:            true,
+		Profile:           "my-profile",
+	}
+	handler, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("got status %d, want 200", rec.Code)
+	}
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+
+	if got, ok := body["daemon"].(bool); !ok || !got {
+		t.Errorf("expected daemon=true in /health body, got %v", body["daemon"])
+	}
+	if got, _ := body["profile"].(string); got != "my-profile" {
+		t.Errorf("expected profile=my-profile in /health body, got %q", got)
+	}
+	if got, _ := body["version"].(string); got != "1.2.3" {
+		t.Errorf("expected version=1.2.3 in /health body, got %q", got)
+	}
+	if _, ok := body["tool"]; !ok {
+		t.Error("expected tool field in daemon /health body (needed by portbind)")
+	}
+}
+
+// TestProxy_Daemon_HealthTokenExpiry verifies that when TokenSource implements
+// tokenExpirer and has a non-zero expiry, token_valid_until appears in /health.
+func TestProxy_Daemon_HealthTokenExpiry(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	ts := &expiringTokenSource{token: "tok", expiry: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)}
+	cfg := &Config{
+		InferenceUpstream: upstream.URL,
+		OTELUpstream:      upstream.URL,
+		TokenSource:       ts,
+		ToolName:          "databricks-claude",
+		Daemon:            true,
+		Profile:           "p",
+	}
+	handler, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+
+	expStr, _ := body["token_valid_until"].(string)
+	if expStr == "" {
+		t.Error("expected token_valid_until in /health body when TokenSource implements tokenExpirer")
+	}
+	if !strings.Contains(expStr, "2030") {
+		t.Errorf("token_valid_until %q does not contain expected year 2030", expStr)
+	}
+}
+
+// TestProxy_NonDaemon_HealthOmitsDaemon verifies that Daemon=false (existing
+// behavior) does NOT include daemon:true in /health — regression guard.
+func TestProxy_NonDaemon_HealthOmitsDaemon(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	cfg := &Config{
+		InferenceUpstream: upstream.URL,
+		OTELUpstream:      upstream.URL,
+		TokenSource:       warmToken("tok"),
+		ToolName:          "databricks-claude",
+		Version:           "0.1.0",
+		Daemon:            false,
+	}
+	handler, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+
+	if v, ok := body["daemon"]; ok {
+		t.Errorf("non-daemon /health should not contain daemon field, got %v", v)
+	}
+	if _, ok := body["pid"]; !ok {
+		t.Error("non-daemon /health should contain pid field")
+	}
+}
+
+// TestProxy_Daemon_ShutdownReturns404 verifies that in daemon mode (no lifecycle
+// wrapper), POST /shutdown returns a clean 404 — the daemon explicitly rejects
+// the route rather than letting it fall through to the inference catch-all
+// (which would forward POST /shutdown upstream and confuse hook probes).
+func TestProxy_Daemon_ShutdownReturns404(t *testing.T) {
+	var upstreamHit bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	cfg := &Config{
+		InferenceUpstream: upstream.URL,
+		OTELUpstream:      upstream.URL,
+		TokenSource:       warmToken("tok"),
+		ToolName:          "databricks-claude",
+		Daemon:            true,
+	}
+	handler, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/shutdown", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("daemon /shutdown: got status %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	if upstreamHit {
+		t.Error("daemon /shutdown leaked to inference upstream; explicit 404 handler should intercept")
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `"remaining"`) || strings.Contains(body, `"exiting"`) {
+		t.Error("daemon /shutdown should not return lifecycle JSON {remaining, exiting}; lifecycle is not registered")
+	}
+}
+
+// TestProxy_NonDaemon_NoExplicit404 verifies the non-daemon path does NOT
+// register the explicit /shutdown 404 — the route is owned by the lifecycle
+// wrapper or, when lifecycle isn't applied, falls through to inference. This
+// guards against the daemon-mode 404 leaking into the per-session path.
+func TestProxy_NonDaemon_NoExplicit404(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	cfg := &Config{
+		InferenceUpstream: upstream.URL,
+		OTELUpstream:      upstream.URL,
+		TokenSource:       warmToken("tok"),
+		ToolName:          "databricks-claude",
+		Daemon:            false,
+	}
+	handler, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/shutdown", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	// Non-daemon mode: the bare NewServer mux falls through to inference
+	// catch-all, which forwards to the test upstream returning 200. The
+	// lifecycle wrapper (applied externally in --headless mode) would
+	// intercept first. Either way, an explicit 404 here would be wrong.
+	if rec.Code == http.StatusNotFound {
+		t.Error("non-daemon /shutdown should not be intercepted with 404; route ownership belongs to lifecycle wrapper or inference fallthrough")
+	}
+}
+
+// TestProxy_Daemon_EmptyOTELTables verifies that when all UC table fields are
+// empty in daemon mode, no X-Databricks-UC-Table-Name header is sent —
+// regression guard against "default to something" footguns.
+func TestProxy_Daemon_EmptyOTELTables(t *testing.T) {
+	var gotTable string
+	var tableHeaderPresent bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, tableHeaderPresent = r.Header["X-Databricks-Uc-Table-Name"]
+		gotTable = r.Header.Get("X-Databricks-UC-Table-Name")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	cfg := &Config{
+		InferenceUpstream: upstream.URL,
+		OTELUpstream:      upstream.URL,
+		UCMetricsTable:    "",
+		UCLogsTable:       "",
+		UCTracesTable:     "",
+		TokenSource:       warmToken("tok"),
+		Daemon:            true,
+	}
+	handler, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	for _, path := range []string{"/otel/v1/metrics", "/otel/v1/logs", "/otel/v1/traces"} {
+		tableHeaderPresent = false
+		gotTable = ""
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if tableHeaderPresent || gotTable != "" {
+			t.Errorf("daemon with empty tables: expected no X-Databricks-UC-Table-Name for %s, got %q", path, gotTable)
+		}
+	}
+}
+
+// expiringTokenSource implements TokenSource and tokenExpirer for testing
+// the token_valid_until field in /health.
+type expiringTokenSource struct {
+	token  string
+	expiry time.Time
+}
+
+func (e *expiringTokenSource) Token(_ context.Context) (string, error) {
+	return e.token, nil
+}
+
+func (e *expiringTokenSource) Expiry() time.Time {
+	return e.expiry
 }

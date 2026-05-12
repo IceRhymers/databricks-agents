@@ -22,14 +22,24 @@ type FlagDef struct {
 	//   "__files"              — complete with local file paths
 }
 
+// SubcommandDef describes a top-level subcommand for shell completion.
+// Subcommand names are offered as completions at position 1 (before any flags).
+type SubcommandDef struct {
+	Name        string // subcommand name, e.g. "serve"
+	Description string // human-readable description shown in completions
+}
+
 // Run handles the positional "completion <shell>" subcommand.
 // Call this as the very first thing in main(), before any flag parsing.
 //
 //	if len(os.Args) >= 2 && os.Args[1] == "completion" {
-//	    completion.Run(os.Args[2:], flagDefs, "databricks-claude")
+//	    completion.Run(os.Args[2:], flagDefs, "databricks-claude", subcommands...)
 //	    os.Exit(0)
 //	}
-func Run(args []string, flags []FlagDef, binaryName string) {
+//
+// subcommands is optional; pass it to enable subcommand-name completion at
+// position 1 (e.g. "serve", "desktop", "setup").
+func Run(args []string, flags []FlagDef, binaryName string, subcommands ...SubcommandDef) {
 	if len(args) == 0 {
 		fmt.Fprintf(os.Stderr, "Usage: %s completion <bash|zsh|fish>\n", binaryName)
 		os.Exit(1)
@@ -38,11 +48,11 @@ func Run(args []string, flags []FlagDef, binaryName string) {
 	shell := strings.TrimPrefix(args[0], "--shell=")
 	switch shell {
 	case "bash":
-		fmt.Print(GenerateBash(binaryName, flags))
+		fmt.Print(GenerateBashFull(binaryName, flags, subcommands))
 	case "zsh":
-		fmt.Print(GenerateZsh(binaryName, flags))
+		fmt.Print(GenerateZshFull(binaryName, flags, subcommands))
 	case "fish":
-		fmt.Print(GenerateFish(binaryName, flags))
+		fmt.Print(GenerateFishFull(binaryName, flags, subcommands))
 	default:
 		fmt.Fprintf(os.Stderr, "%s completion: unknown shell %q (supported: bash zsh fish)\n", binaryName, shell)
 		os.Exit(1)
@@ -50,7 +60,15 @@ func Run(args []string, flags []FlagDef, binaryName string) {
 }
 
 // GenerateBash returns a bash completion script for the given binary and flags.
+// Equivalent to GenerateBashFull with no subcommands.
 func GenerateBash(binaryName string, flags []FlagDef) string {
+	return GenerateBashFull(binaryName, flags, nil)
+}
+
+// GenerateBashFull returns a bash completion script with optional subcommand support.
+// When subcommands is non-empty, typing at position 1 without a "-" prefix
+// completes subcommand names.
+func GenerateBashFull(binaryName string, flags []FlagDef, subcommands []SubcommandDef) string {
 	fn := bashFuncName(binaryName)
 	var b strings.Builder
 
@@ -70,6 +88,17 @@ func GenerateBash(binaryName string, flags []FlagDef) string {
 	b.WriteString("        if [[ \"${COMP_WORDS[i]}\" == \"--\" ]]; then return; fi\n")
 	b.WriteString("    done\n")
 	b.WriteString("\n")
+
+	if len(subcommands) > 0 {
+		b.WriteString("    # Subcommand completion at position 1.\n")
+		b.WriteString("    if [[ \"${COMP_CWORD}\" == \"1\" ]] && [[ \"$cur\" != -* ]]; then\n")
+		b.WriteString("        local subcmds=\"" + subcommandNames(subcommands) + "\"\n")
+		b.WriteString("        COMPREPLY=($(compgen -W \"$subcmds\" -- \"$cur\"))\n")
+		b.WriteString("        return\n")
+		b.WriteString("    fi\n")
+		b.WriteString("\n")
+	}
+
 	b.WriteString("    # Value completion for flags that take arguments.\n")
 	b.WriteString("    case \"$prev\" in\n")
 	for _, f := range flags {
@@ -102,7 +131,13 @@ func GenerateBash(binaryName string, flags []FlagDef) string {
 }
 
 // GenerateZsh returns a zsh completion script for the given binary and flags.
+// Equivalent to GenerateZshFull with no subcommands.
 func GenerateZsh(binaryName string, flags []FlagDef) string {
+	return GenerateZshFull(binaryName, flags, nil)
+}
+
+// GenerateZshFull returns a zsh completion script with optional subcommand support.
+func GenerateZshFull(binaryName string, flags []FlagDef, subcommands []SubcommandDef) string {
 	fn := "_" + strings.ReplaceAll(binaryName, "-", "_")
 	var b strings.Builder
 
@@ -122,6 +157,19 @@ func GenerateZsh(binaryName string, flags []FlagDef) string {
 		b.WriteString("    _profiles=(${(f)\"$(__databricks_profiles)\"})\n\n")
 	}
 
+	if len(subcommands) > 0 {
+		b.WriteString("    local -a _subcmds\n")
+		for _, s := range subcommands {
+			desc := strings.ReplaceAll(s.Description, "'", "\\'")
+			b.WriteString("    _subcmds+=(" + fmt.Sprintf("'%s:%s'", s.Name, desc) + ")\n")
+		}
+		b.WriteString("\n")
+		b.WriteString("    if (( CURRENT == 2 )) && [[ \"${words[2]}\" != -* ]]; then\n")
+		b.WriteString("        _describe 'subcommand' _subcmds\n")
+		b.WriteString("        return\n")
+		b.WriteString("    fi\n\n")
+	}
+
 	b.WriteString("    _arguments \\\n")
 	for _, f := range flags {
 		b.WriteString("        " + zshFlagSpec(f) + " \\\n")
@@ -133,7 +181,13 @@ func GenerateZsh(binaryName string, flags []FlagDef) string {
 }
 
 // GenerateFish returns a fish completion script for the given binary and flags.
+// Equivalent to GenerateFishFull with no subcommands.
 func GenerateFish(binaryName string, flags []FlagDef) string {
+	return GenerateFishFull(binaryName, flags, nil)
+}
+
+// GenerateFishFull returns a fish completion script with optional subcommand support.
+func GenerateFishFull(binaryName string, flags []FlagDef, subcommands []SubcommandDef) string {
 	var b strings.Builder
 
 	b.WriteString("# Shell completions for " + binaryName + "\n")
@@ -144,6 +198,16 @@ func GenerateFish(binaryName string, flags []FlagDef) string {
 	// Named completer function bodies.
 	for _, c := range uniqueCompleters(flags) {
 		b.WriteString(fishCompleterBody(binaryName, c))
+		b.WriteString("\n")
+	}
+
+	if len(subcommands) > 0 {
+		b.WriteString("# Subcommand completions.\n")
+		for _, s := range subcommands {
+			desc := strings.ReplaceAll(s.Description, "'", "\\'")
+			b.WriteString(fmt.Sprintf("complete -c %s -n '__fish_use_subcommand' -a '%s' -d '%s'\n",
+				binaryName, s.Name, desc))
+		}
 		b.WriteString("\n")
 	}
 
@@ -250,6 +314,15 @@ func zshFlagSpec(f FlagDef) string {
 		}
 	}
 	return fmt.Sprintf("%s[%s]'", long, desc)
+}
+
+// subcommandNames returns a space-separated string of subcommand names.
+func subcommandNames(subcommands []SubcommandDef) string {
+	var names []string
+	for _, s := range subcommands {
+		names = append(names, s.Name)
+	}
+	return strings.Join(names, " ")
 }
 
 // fishFlagLine returns the complete line for one flag.

@@ -31,10 +31,11 @@ The root package is a set of `.go` files that act as thin facades wiring togethe
 - **state.go** — `persistentState` struct: JSON schema for `~/.claude/.databricks-claude.json` (profile, port, CLI path, OTEL table names).
 - **hooks.go** — Session hook install/uninstall (`installHooks`, `uninstallHooks`).
 - **ensureconfig.go** — Bootstrap helpers for first-run settings setup.
-- **completion_flags.go** — `flagDefs` slice driving shell completion and flag parsing.
+- **completion_flags.go** — `flagDefs` slice driving shell completion and flag parsing; `knownSubcommands` slice driving subcommand-name completion.
 - **databrickscfg.go** — Reads `~/.databrickscfg` section headers for profile name resolution.
 - **desktop_config.go** — `desktop` subcommand: `generate-config` writing `.mobileconfig`, `.reg`, and `.json` artifacts for Claude Desktop.
 - **desktop_trust.go** — `generate-trust-profile` subcommand for MDM trust profile generation.
+- **serve.go** — `serve` subcommand: long-lived daemon that serves Claude Code and Claude Desktop with persistent Databricks OAuth. A third deployment mode alongside the per-session CLI wrapper (`databricks-claude claude …`) and SessionStart hooks — useful when you want a single OAuth-refreshing proxy that survives across sessions. `runServe(args)` parses flags, resolves profile/port/OTEL tables, calls `authcheck.EnsureAuthenticated`, binds port exclusively, and runs the proxy with `Daemon=true`. `printServeHelp()` mirrors `printDesktopHelp`/`printSetupHelp` in shape.
 
 ### Library packages (`pkg/`)
 

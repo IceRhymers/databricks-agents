@@ -1,6 +1,8 @@
 package main
 
-import "github.com/IceRhymers/databricks-claude/pkg/completion"
+import (
+	"github.com/IceRhymers/databricks-claude/pkg/completion"
+)
 
 // flagDefs is the authoritative list of flags owned by databricks-claude.
 // Everything not listed here is forwarded transparently to the claude binary.
@@ -54,3 +56,13 @@ var knownFlags = func() map[string]bool {
 	}
 	return m
 }()
+
+// knownSubcommands is the authoritative list of top-level subcommands for shell
+// completion. They are offered as completions at position 1 (before any flags).
+var knownSubcommands = []completion.SubcommandDef{
+	{Name: "completion", Description: "Generate shell completion scripts (bash, zsh, fish)"},
+	{Name: "update", Description: "Check for a newer release and print upgrade instructions"},
+	{Name: "desktop", Description: "Claude Desktop integration (generate-config, credential-helper)"},
+	{Name: "setup", Description: "Idempotent auth bootstrap for fleet init scripts"},
+	{Name: "serve", Description: "Long-lived daemon for MDM-deployed Claude Desktop deployments"},
+}

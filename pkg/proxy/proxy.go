@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
 // TokenSource provides tokens for upstream authentication.
@@ -61,6 +62,18 @@ type Config struct {
 	// inference requests are forwarded byte-identically and this struct
 	// has no effect — see pkg/proxy/websearch_handler.go.
 	WebSearch WebSearchSettings
+	// Daemon, when true, indicates this proxy is running as a long-lived daemon
+	// (databricks-claude serve). The /health response includes daemon-specific
+	// fields; /shutdown is not registered (serve.go never wraps with lifecycle).
+	Daemon bool
+	// Profile is the Databricks config profile name, reported in /health when Daemon=true.
+	Profile string
+}
+
+// tokenExpirer is an optional extension of TokenSource for reporting token expiry.
+// pkg/tokencache.TokenProvider implements this interface.
+type tokenExpirer interface {
+	Expiry() time.Time
 }
 
 // RecoveryHandler wraps h with panic recovery, returning 502 on panic.
@@ -370,8 +383,26 @@ func NewServer(config *Config) (http.Handler, error) {
 	}
 
 	// Health endpoint — used by portbind to detect an existing proxy for this tool.
+	// In daemon mode the body includes daemon:true, profile, and token_valid_until
+	// so hooks (e.g. SessionStart) can detect and no-op.
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if config.Daemon {
+			body := map[string]interface{}{
+				"tool":    config.ToolName,
+				"status":  "ok",
+				"daemon":  true,
+				"version": config.Version,
+				"profile": config.Profile,
+			}
+			if expirer, ok := config.TokenSource.(tokenExpirer); ok {
+				if t := expirer.Expiry(); !t.IsZero() {
+					body["token_valid_until"] = t.UTC().Format(time.RFC3339)
+				}
+			}
+			json.NewEncoder(w).Encode(body)
+			return
+		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"tool":    config.ToolName,
 			"version": config.Version,
@@ -380,6 +411,17 @@ func NewServer(config *Config) (http.Handler, error) {
 	})
 
 	mux.Handle("/otel/", RecoveryHandler(otelProxy))
+
+	// Daemon mode: explicitly reject /shutdown with 404 so it does not fall
+	// through to the inference catch-all (which would forward POST /shutdown
+	// upstream). Hooks that probe /shutdown to release per-session refcounts
+	// must see a clean 404 to know the daemon is not managing their session.
+	if config.Daemon {
+		mux.HandleFunc("/shutdown", func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		})
+	}
+
 	mux.Handle("/", RecoveryHandler(inferenceHandlerHTTP))
 
 	// APIKey check applies to all connections including WebSocket upgrades (used by databricks-codex)

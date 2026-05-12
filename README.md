@@ -397,6 +397,65 @@ databricks-claude setup --profile databricks-ai-inference --force
 
 `setup` is the same auth flow the credential helper uses for daily token recovery — running it proactively in a fleet init script keeps users from seeing the recovery browser tab on their first Claude Desktop launch.
 
+## serve Subcommand
+
+Long-lived daemon that serves **both Claude Code and Claude Desktop** with persistent Databricks OAuth. A third deployment mode alongside the per-session CLI wrapper (`databricks-claude claude …`) and SessionStart hooks — useful when you want a single OAuth-refreshing proxy that survives across sessions.
+
+Owns Databricks OAuth refresh and exposes inference + OTLP on `127.0.0.1`. Distinguished from `--headless` mode by: no session refcount, no `/shutdown` route, append-only logging, and `daemon:true` in `/health` so hooks can detect and no-op.
+
+Designed for LaunchAgent (macOS) or systemd (Linux) deployment, where the daemon is started once at login and kept running. Configure your client to point at the daemon:
+- **Claude Desktop:** via MDM, set `gatewayBaseUrl: http://127.0.0.1:<port>` with a static fake API key (no per-user secret distribution).
+- **Claude Code:** edit `~/.claude/settings.json` once to set `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>` in the env block. The daemon does NOT mutate `settings.json` itself — it stays outside the per-tool lifecycle by design.
+
+```bash
+# Minimal daemon on default port:
+databricks-claude serve
+
+# With explicit profile, port, and persistent log file:
+databricks-claude serve \
+  --profile databricks-ai-inference \
+  --port 49153 \
+  --log-file /var/log/databricks-claude/daemon.log
+
+# With OTEL table routing:
+databricks-claude serve \
+  --otel-metrics-table main.claude_telemetry.claude_otel_metrics \
+  --otel-logs-table main.claude_telemetry.claude_otel_logs
+```
+
+| Flag | Purpose |
+|------|---------|
+| `--port int` | Proxy listen port (default: `49153`). Bound exclusively — MDM-baked `gatewayBaseUrl` is a fixed URL and cannot follow a fallback port. |
+| `--profile string` | Databricks config profile (default: saved state → MDM `databricksProfile` key → `"DEFAULT"`) |
+| `--log-file string` | Append-only log file (`O_APPEND`, not `O_TRUNC`). Safe for log rotation. Restarts preserve prior content. |
+| `--verbose`, `-v` | Also write debug logs to stderr (combinable with `--log-file`) |
+| `--otel-metrics-table string` | Unity Catalog table for OTEL metrics. Resolution: flag → saved state → MDM `otelMetricsTable` key → empty. |
+| `--otel-logs-table string` | Unity Catalog table for OTEL logs (same resolution chain) |
+| `--otel-traces-table string` | Unity Catalog table for OTEL traces (same resolution chain) |
+| `--help`, `-h` | Show subcommand help |
+
+**OTEL table behavior when empty:** The daemon does **not** fail startup when a table is unset. It forwards OTLP for that signal without the `X-Databricks-UC-Table-Name` header; Databricks ingest rejects those requests with a visible 4xx — an actionable failure, not a silent one.
+
+**MDM keys** (domain `com.icerhymers.databricks-claude`):
+
+| Key | Purpose |
+|-----|---------|
+| `databricksProfile` | Databricks CLI profile name |
+| `otelMetricsTable` | UC table for OTEL metrics |
+| `otelLogsTable` | UC table for OTEL logs |
+| `otelTracesTable` | UC table for OTEL traces |
+
+**Endpoints:**
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Returns `{"tool":"databricks-claude","daemon":true,"version":"...","profile":"...","token_valid_until":"..."}` |
+| `POST /shutdown` | **Not registered** — returns 404. Stop the daemon via SIGTERM (e.g. `launchctl stop` or `systemctl stop`). |
+
+**Note:** `--otel` / `--no-otel*` flags are **not** supported for `serve`. Those flags mutate `~/.claude/settings.json` to configure Claude Code's OTLP emission. In daemon mode, Claude Desktop reads OTLP config from MDM, not from any wrapper-mutated file. Omit `otlpEndpoint` from the MDM profile to disable OTLP fleet-wide.
+
+**Port collision:** If port `49153` is unavailable at startup, `serve` prints the error and exits (unlike the CLI wrapper, which falls back to `:0`). The MDM-baked `gatewayBaseUrl` is a fixed URL that cannot follow a dynamic fallback. Stop the existing instance before restarting.
+
 ## Headless Mode
 
 `--headless` starts the proxy without launching a `claude` child process, for use by IDE extensions and external tooling.
