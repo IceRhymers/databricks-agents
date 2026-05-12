@@ -59,6 +59,14 @@ func Ensure(cfg Config) error {
 		return nil
 	}
 
+	// Short-circuit before touching refcount: when the serve daemon is running it
+	// manages its own lifecycle — this hook must be a no-op to avoid phantom
+	// refcount entries that would prevent the daemon from running indefinitely.
+	if mode, _ := health.ProxyMode(cfg.Port, cfg.Scheme); mode == "daemon" {
+		log.Printf("%s: --headless-ensure: managed by daemon, hook is no-op", cfg.LogPrefix)
+		return nil
+	}
+
 	// Acquire refcount FIRST so every ensure/release pair is symmetric.
 	if cfg.RefcountPath != "" {
 		if err := refcount.Acquire(cfg.RefcountPath); err != nil {

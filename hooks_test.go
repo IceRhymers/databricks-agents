@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -90,5 +91,59 @@ func TestRefcountPathForPort(t *testing.T) {
 	got := refcount.PathForPort(".databricks-claude-sessions", 12345)
 	if got != want {
 		t.Errorf("PathForPort(..., 12345) = %q, want %q", got, want)
+	}
+}
+
+// TestHeadlessRelease_DaemonSkipsShutdown verifies that when the proxy is
+// running in daemon mode, headlessRelease does not POST /shutdown.
+func TestHeadlessRelease_DaemonSkipsShutdown(t *testing.T) {
+	shutdownCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintln(w, `{"daemon":true}`)
+		case "/shutdown":
+			shutdownCalled = true
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+	headlessRelease(port)
+
+	if shutdownCalled {
+		t.Error("/shutdown was called in daemon mode; headlessRelease must be a no-op when daemon is running")
+	}
+}
+
+// TestHeadlessRelease_EphemeralPostsShutdown verifies that when the proxy is
+// running in ephemeral mode, headlessRelease POSTs /shutdown as expected.
+func TestHeadlessRelease_EphemeralPostsShutdown(t *testing.T) {
+	shutdownCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintln(w, `{"daemon":false}`)
+		case "/shutdown":
+			if r.Method == http.MethodPost {
+				shutdownCalled = true
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+	headlessRelease(port)
+
+	if !shutdownCalled {
+		t.Error("/shutdown was not called in ephemeral mode; headlessRelease must POST /shutdown for non-daemon proxy")
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/IceRhymers/databricks-claude/pkg/headless"
+	"github.com/IceRhymers/databricks-claude/pkg/health"
 	"github.com/IceRhymers/databricks-claude/pkg/refcount"
 )
 
@@ -32,6 +33,11 @@ func headlessEnsure(port int) {
 func headlessRelease(port int) {
 	if os.Getenv("DATABRICKS_CLAUDE_MANAGED") == "1" {
 		log.Printf("databricks-claude: --headless-release: skipped (managed session)")
+		return
+	}
+
+	if mode, _ := health.ProxyMode(port, "http"); mode == "daemon" {
+		log.Printf("databricks-claude: --headless-release: managed by daemon, hook is no-op")
 		return
 	}
 

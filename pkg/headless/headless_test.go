@@ -1,11 +1,15 @@
 package headless
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"testing"
+
+	"github.com/IceRhymers/databricks-claude/pkg/refcount"
 )
 
 func TestEnsure_ManagedSessionSkips(t *testing.T) {
@@ -55,6 +59,71 @@ func TestEnsure_BadBinaryReturnsError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected non-nil error when binary does not exist, got nil")
+	}
+}
+
+// TestEnsure_DaemonModeNoOp verifies that when the proxy answers /health with
+// daemon:true, Ensure returns nil immediately without acquiring the refcount.
+func TestEnsure_DaemonModeNoOp(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintln(w, `{"daemon":true}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+	rcPath := refcount.PathForPort(".databricks-claude-sessions-headlesstest", port)
+	os.Remove(rcPath)
+	t.Cleanup(func() { os.Remove(rcPath) })
+
+	if err := Ensure(Config{
+		Port:         port,
+		Scheme:       "http",
+		LogPrefix:    "test",
+		RefcountPath: rcPath,
+	}); err != nil {
+		t.Fatalf("Ensure in daemon mode returned error: %v", err)
+	}
+
+	if _, err := os.Stat(rcPath); !os.IsNotExist(err) {
+		t.Error("refcount file was created in daemon mode; Ensure must not touch refcount when daemon is running")
+	}
+}
+
+// TestEnsure_EphemeralAcquiresRefcount verifies that when the proxy answers
+// /health with daemon:false, Ensure follows the normal path and acquires the
+// refcount before returning.
+func TestEnsure_EphemeralAcquiresRefcount(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintln(w, `{"daemon":false}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+	rcPath := refcount.PathForPort(".databricks-claude-sessions-headlesstest", port)
+	os.Remove(rcPath)
+	t.Cleanup(func() { os.Remove(rcPath) })
+
+	if err := Ensure(Config{
+		Port:         port,
+		Scheme:       "http",
+		LogPrefix:    "test",
+		RefcountPath: rcPath,
+	}); err != nil {
+		t.Fatalf("Ensure in ephemeral mode returned error: %v", err)
+	}
+
+	if _, err := os.Stat(rcPath); os.IsNotExist(err) {
+		t.Error("refcount file was not created in ephemeral mode; Ensure must acquire refcount for non-daemon proxy")
 	}
 }
 
