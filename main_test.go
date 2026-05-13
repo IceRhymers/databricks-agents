@@ -43,6 +43,19 @@ func TestParseArgs_HelpShort(t *testing.T) {
 	}
 }
 
+// "--" terminates wrapper flag parsing, so "-- --help" must NOT trigger the
+// wrapper's help and must forward "--help" to claude verbatim. The wrapper's
+// `--help` documentation advertises this as the way to reach claude's help.
+func TestParseArgs_SeparatorForwardsHelp(t *testing.T) {
+	a, _ := parseArgs([]string{"--", "--help"})
+	if a.ShowHelp {
+		t.Error("expected showHelp=false when --help appears after --")
+	}
+	if len(a.ClaudeArgs) != 1 || a.ClaudeArgs[0] != "--help" {
+		t.Errorf("expected ClaudeArgs=[--help], got %v", a.ClaudeArgs)
+	}
+}
+
 func TestParseArgs_PrintEnv(t *testing.T) {
 	a, _ := parseArgs([]string{"--print-env"})
 	if !a.PrintEnv {
@@ -691,7 +704,7 @@ func TestHandlePrintEnv_EmptyTokenRedacted(t *testing.T) {
 
 func TestHandleHelp_ContainsDatabricksClaude(t *testing.T) {
 	out := captureStdout(func() {
-		handleHelp("")
+		handleHelp()
 	})
 	if !strings.Contains(out, "databricks-claude") {
 		t.Errorf("expected help output to contain 'databricks-claude', got:\n%s", out)
@@ -700,36 +713,16 @@ func TestHandleHelp_ContainsDatabricksClaude(t *testing.T) {
 
 func TestHandleHelp_ContainsPrintEnvFlag(t *testing.T) {
 	out := captureStdout(func() {
-		handleHelp("")
+		handleHelp()
 	})
 	if !strings.Contains(out, "--print-env") {
 		t.Errorf("expected help output to contain '--print-env', got:\n%s", out)
 	}
 }
 
-func TestHandleHelp_ContainsClaudeCLISeparator(t *testing.T) {
-	out := captureStdout(func() {
-		handleHelp("")
-	})
-	if !strings.Contains(out, "Claude CLI Options:") {
-		t.Errorf("expected help output to contain 'Claude CLI Options:', got:\n%s", out)
-	}
-}
-
-func TestHandleHelp_WithNonExistentUpstream(t *testing.T) {
-	// When an upstream binary is given but doesn't exist, handleHelp should
-	// still print the databricks-claude header without panicking.
-	out := captureStdout(func() {
-		handleHelp("/nonexistent/path/to/claude")
-	})
-	if !strings.Contains(out, "databricks-claude") {
-		t.Errorf("expected header even with bad upstream binary, got:\n%s", out)
-	}
-}
-
 func TestHandleHelp_AllFlagsPresent(t *testing.T) {
 	out := captureStdout(func() {
-		handleHelp("")
+		handleHelp()
 	})
 	flags := []string{"--profile", "--upstream", "--verbose", "-v", "--log-file", "--otel", "--otel-metrics-table", "--otel-logs-table", "--headless", "--idle-timeout", "--version", "--help"}
 	for _, flag := range flags {
@@ -742,11 +735,26 @@ func TestHandleHelp_AllFlagsPresent(t *testing.T) {
 // Verify the version placeholder is printed in the help header.
 func TestHandleHelp_ContainsVersion(t *testing.T) {
 	out := captureStdout(func() {
-		handleHelp("")
+		handleHelp()
 	})
 	// Version variable is "dev" by default in tests.
 	if !strings.Contains(out, fmt.Sprintf("databricks-claude v%s", Version)) {
 		t.Errorf("expected help output to contain version string, got:\n%s", out)
+	}
+}
+
+// Verify the help output advertises the "--" passthrough escape hatch so
+// users can find their way to claude's own --help without surprise. If this
+// regresses, users coming from older versions lose the only signal that
+// `databricks-claude -- --help` is the path to claude's flags.
+func TestHandleHelp_AdvertisesPassthrough(t *testing.T) {
+	out := captureStdout(func() {
+		handleHelp()
+	})
+	for _, want := range []string{"Passthrough to claude:", "databricks-claude -- --help"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected help output to contain %q, got:\n%s", want, out)
+		}
 	}
 }
 

@@ -1,4 +1,29 @@
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# Windows lacks `ln`, and Go on Windows expects an .exe suffix. Claude Desktop
+# on Windows still needs the `databricks-claude-credential-helper.exe` alias
+# (the .reg MDM artifact points at it), so on Windows we create a hard link
+# via `fsutil hardlink create` — no admin/Developer-Mode required (unlike a
+# true symlink). We pin SHELL to cmd.exe on Windows so the recipes work
+# regardless of whether the user invokes make from PowerShell, cmd, or Git
+# Bash — `rm`/`ln`/`/dev/null` can't be relied on across those.
+ifeq ($(OS),Windows_NT)
+SHELL              := cmd.exe
+.SHELLFLAGS        := /c
+EXE                := .exe
+DEVNULL            := nul
+GOPATH_BIN          := $(shell go env GOPATH)\bin
+# Parens around the `if exist` block are load-bearing: without them, cmd
+# parses the following `& fsutil ...` as part of the if's body and skips it
+# whenever the alias doesn't already exist (i.e., every fresh build).
+LINK_ALIAS          = (if exist databricks-claude-credential-helper.exe del /f /q databricks-claude-credential-helper.exe) & fsutil hardlink create databricks-claude-credential-helper.exe databricks-claude.exe
+INSTALL_LINK_ALIAS  = (if exist "$(GOPATH_BIN)\databricks-claude-credential-helper.exe" del /f /q "$(GOPATH_BIN)\databricks-claude-credential-helper.exe") & fsutil hardlink create "$(GOPATH_BIN)\databricks-claude-credential-helper.exe" "$(GOPATH_BIN)\databricks-claude.exe"
+else
+EXE                :=
+DEVNULL            := /dev/null
+LINK_ALIAS          = ln -sf databricks-claude databricks-claude-credential-helper
+INSTALL_LINK_ALIAS  = ln -sf databricks-claude "$$(go env GOPATH)/bin/databricks-claude-credential-helper"
+endif
+
+VERSION ?= $(shell git describe --tags --always --dirty 2>$(DEVNULL) || echo dev)
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 
 # Subject identity for `make generate-signing-cert`. Override these for your
@@ -11,17 +36,18 @@ CERT_COUNTRY ?= US
 
 .DEFAULT_GOAL := build
 
-## Build the databricks-claude binary (and the credential-helper symlink that
-## the Claude Desktop mobileconfig field expects).
+## Build the databricks-claude binary (and the credential-helper alias that
+## the Claude Desktop MDM artifacts expect — symlink on Unix, hard link on
+## Windows).
 build:
-	go build -ldflags="$(LDFLAGS)" -o databricks-claude .
-	ln -sf databricks-claude databricks-claude-credential-helper
+	go build -ldflags="$(LDFLAGS)" -o databricks-claude$(EXE) .
+	$(LINK_ALIAS)
 
-## Install to GOPATH/bin (also drops the credential-helper symlink so Claude
+## Install to GOPATH/bin (also drops the credential-helper alias so Claude
 ## Desktop's inferenceCredentialHelper can target a stable path).
 install:
 	go install -ldflags="$(LDFLAGS)" .
-	ln -sf databricks-claude "$$(go env GOPATH)/bin/databricks-claude-credential-helper"
+	$(INSTALL_LINK_ALIAS)
 
 ## Run tests with verbose output
 test:

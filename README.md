@@ -562,7 +562,7 @@ databricks-claude --headless
 | `--idle-timeout` | `30m` | Idle timeout in headless mode (`0` disables) |
 | `--version` | | Print version and exit |
 | `--print-env` | | Print resolved configuration (token redacted) and exit |
-| `--help`, `-h` | | Print wrapper flags and the full `claude --help` output, then exit |
+| `--help`, `-h` | | Print the wrapper's flags and exit. Use `databricks-claude -- --help` to forward to claude's own `--help`. |
 
 All other flags and args are forwarded to `claude`.
 
@@ -626,7 +626,7 @@ If the token shows as empty or the base URL looks wrong, check your Databricks C
 
 ### View full usage
 
-`databricks-claude --help` (or `-h`) prints the wrapper's own flags followed by the complete `claude --help` output, so you see everything in one place.
+`databricks-claude --help` (or `-h`) prints only the wrapper's own flags and subcommands. To reach claude's own `--help` — or pass any flag through to the wrapped `claude` CLI — use the `--` separator: anything after `--` is forwarded verbatim. For example, `databricks-claude -- --help` shows claude's help, and `databricks-claude -- --model opus -p "hi"` runs claude with the given flags.
 
 ## Shell Tab Completions
 

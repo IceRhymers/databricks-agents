@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -155,7 +154,9 @@ func main() {
 	// Parse databricks-claude flags, passing everything else through to claude.
 	// Usage: databricks-claude [databricks-claude-flags] [--] [claude-args...]
 	// Unknown flags are forwarded to claude automatically.
-	// Tip: use "databricks-claude -- completion" to pass "completion" to claude.
+	// Tip: anything after "--" is forwarded to claude verbatim — e.g.
+	// "databricks-claude -- --help" shows claude's own help, and
+	// "databricks-claude -- completion" passes "completion" to claude.
 	a, err := parseArgs(os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "databricks-claude:", err)
@@ -163,7 +164,7 @@ func main() {
 	}
 
 	if a.ShowHelp {
-		handleHelp(a.Upstream)
+		handleHelp()
 		os.Exit(0)
 	}
 
@@ -1035,8 +1036,10 @@ func parseArgs(args []string) (*Args, error) {
 	return a, nil
 }
 
-// handleHelp prints the databricks-claude help message and appends claude's own --help output.
-func handleHelp(upstreamBinary string) {
+// handleHelp prints the databricks-claude help message. Only the wrapper's
+// own flags and subcommands are documented here; claude's CLI help is
+// reachable via the `--` passthrough escape hatch (databricks-claude -- --help).
+func handleHelp() {
 	fmt.Printf(`databricks-claude v%s — Databricks AI Gateway proxy for Claude Code
 
 Transparently proxies the Claude Code CLI with Databricks AI Gateway authentication
@@ -1114,29 +1117,12 @@ Example Unity Catalog table setup (run in a Databricks SQL warehouse):
     ... -- see https://docs.databricks.com/aws/en/ai-gateway/coding-agent-integration-beta
   ) USING DELTA TBLPROPERTIES ('otel.schemaVersion' = 'v1');
 
-────────────────────────────────────────────────────────────────────────────────
-Claude CLI Options:
+Passthrough to claude:
+  Anything after a "--" separator is forwarded to the claude CLI unchanged.
+  Examples:
+    databricks-claude -- --help                # show claude's own help
+    databricks-claude -- --model opus -p "hi"  # run claude with extra flags
 `, Version)
-
-	// Determine which binary to run for --help passthrough.
-	claudeBin := upstreamBinary
-	if claudeBin == "" {
-		if p, err := exec.LookPath("claude"); err == nil {
-			claudeBin = p
-		}
-	}
-
-	if claudeBin == "" {
-		fmt.Println("(claude binary not found on PATH — install from https://claude.ai/code)")
-		return
-	}
-
-	var buf bytes.Buffer
-	cmd := exec.Command(claudeBin, "--help")
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	_ = cmd.Run()
-	fmt.Print(buf.String())
 }
 
 // buildUpdaterConfig returns the standard updater.Config for databricks-claude.
