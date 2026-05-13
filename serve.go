@@ -16,7 +16,95 @@ import (
 	"github.com/IceRhymers/databricks-claude/pkg/authcheck"
 	"github.com/IceRhymers/databricks-claude/pkg/mdmprofile"
 	"github.com/IceRhymers/databricks-claude/pkg/proxy"
+	"github.com/IceRhymers/databricks-claude/pkg/websearch"
 )
+
+// serveResolved bundles the inputs needed to build the daemon's proxy.Config.
+// File-private — lives in serve.go so buildServeProxyConfig is testable in
+// isolation without re-invoking the full runServe resolution chain.
+type serveResolved struct {
+	profile           string
+	inferenceUpstream string
+	otelUpstream      string
+	metricsTable      string
+	logsTable         string
+	tracesTable       string
+	tp                proxy.TokenSource
+	verbose           bool
+}
+
+// buildServeProxyConfig constructs the daemon's *proxy.Config from persistent
+// state and resolved runServe inputs. Extracted so the WebSearch wiring is
+// covered by serve_test.go assertions and so a future refactor that drops
+// the WebSearch field would fail those tests instead of silently regressing
+// the workaround.
+//
+// Fail-soft on a bad WebSearchBackend value: emits a dual stderr+log error
+// (so it lands in the LaunchAgent stderr log AND any --log-file) and
+// disables websearch for this daemon run. The daemon's primary duty is OAuth
+// refresh; a malformed state value must not crash-loop launchd/systemd.
+func buildServeProxyConfig(st persistentState, r serveResolved) *proxy.Config {
+	withWebSearch := st.WithWebSearch
+	wsBackend := st.WebSearchBackend
+	wsBudget := st.WebSearchFetchBudget
+	if wsBackend == "" {
+		wsBackend = "duckduckgo"
+	}
+	if wsBudget <= 0 {
+		wsBudget = 100 * 1024
+	}
+
+	var wsBackendImpl websearch.Backend
+	var wsRobots websearch.RobotsChecker
+	if withWebSearch {
+		// Unconditional stderr write — matches main.go:724-729 wrapper banner.
+		// serve.go redirects os.Stdout to os.Stderr (see runServe) so this
+		// always lands in the LaunchAgent / systemd stderr log regardless
+		// of --verbose / --log-file gating.
+		fmt.Fprintln(os.Stderr, "databricks-claude: --with-websearch is a workaround. Anthropic's native")
+		fmt.Fprintln(os.Stderr, "  web_search and web_fetch tools are not yet supported by Databricks FMAPI.")
+		fmt.Fprintf(os.Stderr, "  This proxy fulfills them locally via backend=%q (per-fetch budget=%d bytes).\n", wsBackend, wsBudget)
+		fmt.Fprintln(os.Stderr, "  Limitations: no JavaScript rendering; robots.txt enforced; headless only.")
+		fmt.Fprintln(os.Stderr, "  This flag will be removed (with one release of deprecation warning) when")
+		fmt.Fprintln(os.Stderr, "  Databricks ships native server-side tool support.")
+
+		b, err := buildWebSearchBackend(wsBackend)
+		if err != nil {
+			// Fail-soft. Dual signal: stderr direct write (always visible
+			// in the LaunchAgent log via the os.Stdout=os.Stderr redirect)
+			// AND log.Printf (lands in --log-file when set). Daemon does
+			// NOT log.Fatalf — that would crash-loop under launchd/systemd
+			// and bring down OAuth refresh, which is the daemon's main job.
+			msg := fmt.Sprintf("databricks-claude: serve: websearch backend build failed: %v — websearch DISABLED for this daemon run", err)
+			fmt.Fprintln(os.Stderr, msg)
+			log.Printf("%s", msg)
+			withWebSearch = false
+		} else {
+			wsBackendImpl = b
+			wsRobots = &websearch.Robots{}
+		}
+	}
+
+	return &proxy.Config{
+		InferenceUpstream: r.inferenceUpstream,
+		OTELUpstream:      r.otelUpstream,
+		UCMetricsTable:    r.metricsTable,
+		UCLogsTable:       r.logsTable,
+		UCTracesTable:     r.tracesTable,
+		TokenSource:       r.tp,
+		Verbose:           r.verbose,
+		ToolName:          "databricks-claude",
+		Version:           Version,
+		Daemon:            true,
+		Profile:           r.profile,
+		WebSearch: proxy.WebSearchSettings{
+			Enabled:     withWebSearch,
+			Backend:     wsBackendImpl,
+			Robots:      wsRobots,
+			FetchBudget: wsBudget,
+		},
+	}
+}
 
 const mdmDomain = "com.icerhymers.databricks-claude"
 
@@ -274,19 +362,18 @@ func runServe(args []string) {
 	}
 
 	// Build proxy handler with Daemon=true (no /shutdown registration, daemon-specific /health body).
-	h, err := proxy.NewServer(&proxy.Config{
-		InferenceUpstream: inferenceUpstream,
-		OTELUpstream:      otelUpstream,
-		UCMetricsTable:    metricsTable,
-		UCLogsTable:       logsTable,
-		UCTracesTable:     tracesTable,
-		TokenSource:       tp,
-		Verbose:           f.verbose,
-		ToolName:          "databricks-claude",
-		Version:           Version,
-		Daemon:            true,
-		Profile:           resolvedProfile,
-	})
+	r := serveResolved{
+		profile:           resolvedProfile,
+		inferenceUpstream: inferenceUpstream,
+		otelUpstream:      otelUpstream,
+		metricsTable:      metricsTable,
+		logsTable:         logsTable,
+		tracesTable:       tracesTable,
+		tp:                tp,
+		verbose:           f.verbose,
+	}
+	cfg := buildServeProxyConfig(st, r)
+	h, err := proxy.NewServer(cfg)
 	if err != nil {
 		ln.Close()
 		log.Fatalf("databricks-claude: serve: failed to create proxy: %v", err)
@@ -310,6 +397,7 @@ func runServe(args []string) {
 	if tracesTable != "" {
 		log.Printf("databricks-claude: serve: otel-traces-table=%s", tracesTable)
 	}
+	log.Printf("databricks-claude: serve: with-websearch=%t", cfg.WebSearch.Enabled)
 
 	// Block until SIGINT or SIGTERM.
 	sigCh := make(chan os.Signal, 1)

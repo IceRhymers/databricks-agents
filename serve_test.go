@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/IceRhymers/databricks-claude/pkg/proxy"
 )
 
 // --- parseServeFlags tests ---
@@ -500,5 +504,161 @@ func TestServePortResolution(t *testing.T) {
 					c.flagPort, c.statePort, got, c.want)
 			}
 		})
+	}
+}
+
+// --- buildServeProxyConfig tests ---
+//
+// These tests lock in the WebSearch wiring on the daemon path. They exist
+// because dropping `WebSearch:` from the proxy.Config struct literal — the
+// exact regression that caused the original bug — must fail loudly here,
+// not silently in production. Helper-only unit tests (resolution defaults)
+// are not sufficient; these assert the wired output.
+
+// captureStderr redirects os.Stderr for the duration of fn and returns the
+// captured bytes. Used by TestBuildServeProxyConfig_WebSearchEnabledBogusBackend
+// to assert the fail-soft error message lands on stderr.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+
+	done := make(chan struct{})
+	var buf bytes.Buffer
+	go func() {
+		_, _ = io.Copy(&buf, r)
+		close(done)
+	}()
+
+	defer func() {
+		os.Stderr = orig
+	}()
+
+	fn()
+	w.Close()
+	<-done
+	return buf.String()
+}
+
+func TestBuildServeProxyConfig_WebSearchDisabled(t *testing.T) {
+	st := persistentState{}
+	r := serveResolved{
+		inferenceUpstream: "https://example.com/ai-gateway/anthropic",
+		otelUpstream:      "https://example.com/api/2.0/otel",
+		profile:           "test",
+	}
+	cfg := buildServeProxyConfig(st, r)
+	if cfg.WebSearch.Enabled {
+		t.Error("WebSearch.Enabled: got true, want false")
+	}
+	if cfg.WebSearch.Backend != nil {
+		t.Errorf("WebSearch.Backend: got %T, want nil", cfg.WebSearch.Backend)
+	}
+	if cfg.WebSearch.Robots != nil {
+		t.Errorf("WebSearch.Robots: got %T, want nil", cfg.WebSearch.Robots)
+	}
+	if !cfg.Daemon {
+		t.Error("Daemon: got false, want true")
+	}
+	if cfg.Profile != "test" {
+		t.Errorf("Profile: got %q, want test", cfg.Profile)
+	}
+}
+
+func TestBuildServeProxyConfig_WebSearchEnabledDefaults(t *testing.T) {
+	st := persistentState{WithWebSearch: true}
+	r := serveResolved{
+		inferenceUpstream: "https://example.com/ai-gateway/anthropic",
+		otelUpstream:      "https://example.com/api/2.0/otel",
+		profile:           "test",
+	}
+
+	out := captureStderr(t, func() {
+		_ = buildServeProxyConfig(st, r)
+	})
+	if !strings.Contains(out, "--with-websearch is a workaround") {
+		t.Errorf("expected workaround banner on stderr, got: %q", out)
+	}
+
+	var got *proxy.Config
+	_ = captureStderr(t, func() { got = buildServeProxyConfig(st, r) })
+	if !got.WebSearch.Enabled {
+		t.Error("WebSearch.Enabled: got false, want true")
+	}
+	if got.WebSearch.Backend == nil {
+		t.Fatal("WebSearch.Backend: got nil, want non-nil")
+	}
+	if name := got.WebSearch.Backend.Name(); name != "duckduckgo" {
+		t.Errorf("WebSearch.Backend.Name(): got %q, want duckduckgo", name)
+	}
+	if got.WebSearch.Robots == nil {
+		t.Error("WebSearch.Robots: got nil, want non-nil")
+	}
+	if got.WebSearch.FetchBudget != 100*1024 {
+		t.Errorf("WebSearch.FetchBudget: got %d, want %d", got.WebSearch.FetchBudget, 100*1024)
+	}
+}
+
+func TestBuildServeProxyConfig_WebSearchEnabledExplicitBudget(t *testing.T) {
+	st := persistentState{
+		WithWebSearch:        true,
+		WebSearchFetchBudget: 204800,
+	}
+	r := serveResolved{
+		inferenceUpstream: "https://example.com/ai-gateway/anthropic",
+		otelUpstream:      "https://example.com/api/2.0/otel",
+	}
+	_ = captureStderr(t, func() {
+		c := buildServeProxyConfig(st, r)
+		if !c.WebSearch.Enabled {
+			t.Error("WebSearch.Enabled: got false, want true")
+		}
+		if c.WebSearch.FetchBudget != 204800 {
+			t.Errorf("WebSearch.FetchBudget: got %d, want 204800", c.WebSearch.FetchBudget)
+		}
+	})
+}
+
+func TestBuildServeProxyConfig_WebSearchEnabledBogusBackend(t *testing.T) {
+	st := persistentState{
+		WithWebSearch:    true,
+		WebSearchBackend: "bogus-backend-that-does-not-exist",
+	}
+	r := serveResolved{
+		inferenceUpstream: "https://example.com/ai-gateway/anthropic",
+		otelUpstream:      "https://example.com/api/2.0/otel",
+	}
+
+	// Route log.Printf into a buffer so we can assert the dual-log signal.
+	origOut := log.Writer()
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(origOut)
+
+	stderr := captureStderr(t, func() {
+		c := buildServeProxyConfig(st, r)
+		// Fail-soft: bad backend disables websearch but daemon stays up.
+		if c.WebSearch.Enabled {
+			t.Error("WebSearch.Enabled: got true, want false (fail-soft on bogus backend)")
+		}
+		if c.WebSearch.Backend != nil {
+			t.Errorf("WebSearch.Backend: got %T, want nil after fail-soft", c.WebSearch.Backend)
+		}
+		if c.WebSearch.Robots != nil {
+			t.Errorf("WebSearch.Robots: got %T, want nil after fail-soft", c.WebSearch.Robots)
+		}
+	})
+	if !strings.Contains(stderr, "websearch backend build failed") {
+		t.Errorf("stderr missing fail-soft error: %q", stderr)
+	}
+	if !strings.Contains(stderr, "websearch DISABLED") {
+		t.Errorf("stderr missing DISABLED notice: %q", stderr)
+	}
+	if !strings.Contains(logBuf.String(), "websearch backend build failed") {
+		t.Errorf("log.Printf missing fail-soft error: %q", logBuf.String())
 	}
 }
