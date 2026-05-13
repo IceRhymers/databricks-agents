@@ -35,6 +35,7 @@ var flagDefs = []completion.FlagDef{
 	{Name: "tls-key", Description: "TLS private key file for the local proxy (requires --tls-cert)", TakesArg: true, Completer: "__files"},
 	{Name: "port", Description: "Proxy listen port (default: 49153)", TakesArg: true},
 	{Name: "headless", Description: "Start proxy without launching claude (for IDE extensions or hooks)"},
+	{Name: "write-claude-config", Description: "Write first-run settings.json env block and exit (no proxy, no port bind)"},
 	{Name: "idle-timeout", Description: "Idle timeout for headless mode (default: 30m; 0 disables; use e.g. 30s, 5m, 1h)", TakesArg: true},
 	{Name: "install-hooks", Description: "Install SessionStart/Stop hooks into ~/.claude/settings.json"},
 	{Name: "uninstall-hooks", Description: "Remove databricks-claude hooks from ~/.claude/settings.json"},

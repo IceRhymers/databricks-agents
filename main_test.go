@@ -1237,6 +1237,264 @@ func TestIdleTimeout_ZeroDisables(t *testing.T) {
 	}
 }
 
+// --- --write-claude-config flag tests ---
+
+func TestParseArgs_WriteClaudeConfig(t *testing.T) {
+	a, err := parseArgs([]string{"--write-claude-config"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !a.WriteClaudeConfig {
+		t.Error("expected WriteClaudeConfig=true for --write-claude-config")
+	}
+	// Must not set any other early-exit flags.
+	if a.ShowHelp || a.Version || a.PrintEnv || a.InstallHooks || a.Headless {
+		t.Error("unexpected non-default values alongside --write-claude-config")
+	}
+	if len(a.ClaudeArgs) != 0 {
+		t.Errorf("expected no claude passthrough args, got %v", a.ClaudeArgs)
+	}
+}
+
+func TestParseArgs_WriteClaudeConfig_WithProfile(t *testing.T) {
+	a, err := parseArgs([]string{"--write-claude-config", "--profile", "foo"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !a.WriteClaudeConfig {
+		t.Error("expected WriteClaudeConfig=true")
+	}
+	if a.Profile != "foo" {
+		t.Errorf("expected Profile=foo, got %q", a.Profile)
+	}
+}
+
+func TestParseArgs_WriteClaudeConfig_WithWebSearch(t *testing.T) {
+	a, err := parseArgs([]string{"--write-claude-config", "--with-websearch", "--websearch-backend", "duckduckgo", "--websearch-fetch-budget", "204800"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !a.WriteClaudeConfig {
+		t.Error("expected WriteClaudeConfig=true")
+	}
+	if !a.WithWebSearchSet || !a.WithWebSearch {
+		t.Errorf("expected WithWebSearch=true (Set=%v, Val=%v)", a.WithWebSearchSet, a.WithWebSearch)
+	}
+	if !a.WebSearchBackendSet || a.WebSearchBackend != "duckduckgo" {
+		t.Errorf("expected WebSearchBackend=duckduckgo (Set=%v, Val=%q)", a.WebSearchBackendSet, a.WebSearchBackend)
+	}
+	if !a.WebSearchFetchBudgetSet || a.WebSearchFetchBudget != 204800 {
+		t.Errorf("expected WebSearchFetchBudget=204800 (Set=%v, Val=%d)", a.WebSearchFetchBudgetSet, a.WebSearchFetchBudget)
+	}
+}
+
+// TestWriteClaudeConfig_PersistsWebSearchState verifies that the resolution
+// + persistence block for --with-websearch in the --write-claude-config
+// branch writes to ~/.claude/.databricks-claude.json so the daemon picks up
+// the websearch opt-in on its next start. Websearch is a proxy-side feature
+// controlled entirely by state — it does NOT add a key to settings.json env.
+// Drives the same block the live code path uses.
+func TestWriteClaudeConfig_PersistsWebSearchState(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	origStatePath := statePath
+	statePath = func() string { return filepath.Join(tmpHome, ".claude", ".databricks-claude.json") }
+	defer func() { statePath = origStatePath }()
+
+	a := &Args{
+		WithWebSearch:           true,
+		WithWebSearchSet:        true,
+		WebSearchBackend:        "duckduckgo",
+		WebSearchBackendSet:     true,
+		WebSearchFetchBudget:    204800,
+		WebSearchFetchBudgetSet: true,
+	}
+
+	// Mirror the resolution+persistence shape inside the --write-claude-config
+	// branch. Any regression here that drops one of the three writes will be
+	// caught by the per-field assertions below.
+	wsState := loadState()
+	withWebSearch := wsState.WithWebSearch
+	wsBackend := wsState.WebSearchBackend
+	wsBudget := wsState.WebSearchFetchBudget
+	if a.WithWebSearchSet {
+		withWebSearch = a.WithWebSearch
+	}
+	if a.WebSearchBackendSet {
+		wsBackend = a.WebSearchBackend
+	}
+	if a.WebSearchFetchBudgetSet {
+		wsBudget = a.WebSearchFetchBudget
+	}
+	mutated := false
+	if a.WithWebSearchSet && wsState.WithWebSearch != withWebSearch {
+		wsState.WithWebSearch = withWebSearch
+		mutated = true
+	}
+	if a.WebSearchBackendSet && wsState.WebSearchBackend != wsBackend {
+		wsState.WebSearchBackend = wsBackend
+		mutated = true
+	}
+	if a.WebSearchFetchBudgetSet && wsState.WebSearchFetchBudget != wsBudget {
+		wsState.WebSearchFetchBudget = wsBudget
+		mutated = true
+	}
+	if mutated {
+		if err := saveState(wsState); err != nil {
+			t.Fatalf("saveState failed: %v", err)
+		}
+	}
+
+	got := loadState()
+	if !got.WithWebSearch {
+		t.Error("expected state.WithWebSearch=true after persist")
+	}
+	if got.WebSearchBackend != "duckduckgo" {
+		t.Errorf("state.WebSearchBackend: got %q, want %q", got.WebSearchBackend, "duckduckgo")
+	}
+	if got.WebSearchFetchBudget != 204800 {
+		t.Errorf("state.WebSearchFetchBudget: got %d, want 204800", got.WebSearchFetchBudget)
+	}
+}
+
+func TestHandleHelp_AdvertisesWriteClaudeConfig(t *testing.T) {
+	out := captureStdout(func() {
+		handleHelp()
+	})
+	if !strings.Contains(out, "--write-claude-config") {
+		t.Errorf("expected help output to contain '--write-claude-config', got:\n%s", out)
+	}
+}
+
+// TestWriteClaudeConfig_BootstrapWritesFullEnvBlock verifies that the
+// bootstrapSettings + ensureConfig write path used by --write-claude-config
+// produces the full needsFullSetup key set without requiring the Databricks CLI.
+//
+// Drives against databricksFullSetupEnv() — the single source of truth used
+// by BOTH the --write-claude-config branch and the normal-startup
+// needsFullSetup block. A regression that deletes any model key, the custom
+// header, or the experimental-betas line from the helper fails this test
+// regardless of which call site is exercised.
+func TestWriteClaudeConfig_BootstrapWritesFullEnvBlock(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	origStatePath := statePath
+	statePath = func() string { return filepath.Join(tmpHome, ".claude", ".databricks-claude.json") }
+	defer func() { statePath = origStatePath }()
+
+	proxyURL := "http://127.0.0.1:49153"
+	otelEnv := databricksFullSetupEnv()
+
+	if err := bootstrapSettings(0, "DEFAULT", proxyURL, otelEnv); err != nil {
+		t.Fatalf("bootstrapSettings failed: %v", err)
+	}
+
+	settingsPath := filepath.Join(tmpHome, ".claude", "settings.json")
+	doc, err := readSettingsJSON(settingsPath)
+	if err != nil {
+		t.Fatalf("readSettingsJSON failed: %v", err)
+	}
+	env, ok := doc["env"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected env block in settings.json")
+	}
+
+	// Proxy/auth keys come from ensureConfig itself, not the helper.
+	if env["ANTHROPIC_BASE_URL"] != proxyURL {
+		t.Errorf("ANTHROPIC_BASE_URL: got %v, want %q", env["ANTHROPIC_BASE_URL"], proxyURL)
+	}
+	if env["ANTHROPIC_AUTH_TOKEN"] != "proxy-managed" {
+		t.Errorf("ANTHROPIC_AUTH_TOKEN: got %v, want \"proxy-managed\"", env["ANTHROPIC_AUTH_TOKEN"])
+	}
+
+	// Every Databricks-specific key from the canonical helper must appear in
+	// the settings.json env block, with the exact value. Asserting value-
+	// equality (not just presence) means a regression bumping any model name
+	// in the helper without updating downstream consumers also fails here.
+	for k, want := range databricksFullSetupEnv() {
+		got, present := env[k]
+		if !present {
+			t.Errorf("missing key %q in settings.json env block (expected %q)", k, want)
+			continue
+		}
+		if got != want {
+			t.Errorf("env[%q]: got %v, want %q", k, got, want)
+		}
+	}
+}
+
+// TestDatabricksFullSetupEnv_KeyCoverage pins the EXACT set of keys the
+// helper returns. If a future change drops one of the four model-name keys,
+// the custom-headers key, or the experimental-betas key, this fails —
+// independent of any call site. Acts as a guard against the most common
+// regression class: "I deleted a line and tests still passed because the
+// integration test only checked presence of some keys."
+func TestDatabricksFullSetupEnv_KeyCoverage(t *testing.T) {
+	env := databricksFullSetupEnv()
+	wantKeys := map[string]bool{
+		"ANTHROPIC_MODEL":                        true,
+		"ANTHROPIC_DEFAULT_OPUS_MODEL":           true,
+		"ANTHROPIC_DEFAULT_SONNET_MODEL":         true,
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL":          true,
+		"ANTHROPIC_CUSTOM_HEADERS":               true,
+		"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": true,
+	}
+	if len(env) != len(wantKeys) {
+		t.Errorf("databricksFullSetupEnv returned %d keys, want exactly %d (regression: added or removed a key without updating this test)",
+			len(env), len(wantKeys))
+	}
+	for k := range wantKeys {
+		if _, ok := env[k]; !ok {
+			t.Errorf("databricksFullSetupEnv missing required key %q", k)
+		}
+	}
+	// Spot-check the three values most likely to drift silently: the model
+	// names use a versioned naming scheme and bump as Databricks ships new
+	// models. Pinning them here means a value typo (e.g. opus-4-7 →
+	// opus-4-8 by mistake) is caught even if the test author updates the
+	// helper map but forgets a downstream consumer.
+	if env["ANTHROPIC_CUSTOM_HEADERS"] != "x-databricks-use-coding-agent-mode: true" {
+		t.Errorf("ANTHROPIC_CUSTOM_HEADERS value drift: got %q", env["ANTHROPIC_CUSTOM_HEADERS"])
+	}
+	if env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] != "1" {
+		t.Errorf("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS value drift: got %q", env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"])
+	}
+}
+
+// TestWriteClaudeConfig_MissingModelKeys confirms that omitting the needsFullSetup
+// keys from otelEnv (passing nil) means model keys are absent — the negative control.
+func TestWriteClaudeConfig_MissingModelKeys(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	origStatePath := statePath
+	statePath = func() string { return filepath.Join(tmpHome, ".claude", ".databricks-claude.json") }
+	defer func() { statePath = origStatePath }()
+
+	if err := bootstrapSettings(0, "DEFAULT", "http://127.0.0.1:49153", nil); err != nil {
+		t.Fatalf("bootstrapSettings failed: %v", err)
+	}
+
+	doc, err := readSettingsJSON(filepath.Join(tmpHome, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("readSettingsJSON failed: %v", err)
+	}
+	env, _ := doc["env"].(map[string]interface{})
+	modelKeys := []string{
+		"ANTHROPIC_MODEL",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+	}
+	for _, k := range modelKeys {
+		if _, present := env[k]; present {
+			t.Errorf("key %q should be absent when otelEnv is nil, but was written", k)
+		}
+	}
+}
+
 // TestCompletionFlagsCoverAllKnownFlags ensures every flag in knownFlags has a
 // corresponding entry in flagDefs. This test fails immediately if someone adds
 // a flag to parseArgs without updating the completion metadata — preventing

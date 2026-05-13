@@ -59,6 +59,7 @@ type Args struct {
 	TLSKey                  string
 	Port                    int
 	Headless                bool
+	WriteClaudeConfig       bool
 	IdleTimeout             time.Duration
 	InstallHooks            bool
 	UninstallHooks          bool
@@ -217,6 +218,146 @@ func main() {
 		} else {
 			headlessRelease(port)
 		}
+		os.Exit(0)
+	}
+
+	// --- Write Claude config and exit (no proxy, no port bind, no child) ---
+	if a.WriteClaudeConfig {
+		wcProfile := a.Profile
+		if wcProfile == "" {
+			if saved := loadState(); saved.Profile != "" {
+				wcProfile = saved.Profile
+			}
+		}
+		if wcProfile == "" {
+			wcProfile = "DEFAULT"
+		}
+
+		wcPort := resolvePort(a.Port, loadState())
+		wcProxyURL := fmt.Sprintf("http://127.0.0.1:%d", wcPort)
+
+		if _, err := DiscoverHost(wcProfile, ""); err != nil {
+			log.Fatalf("databricks-claude: failed to discover host for profile %q: %v\nRun 'databricks auth login --profile %s' first",
+				wcProfile, err, wcProfile)
+		}
+
+		// Resolve OTEL tables: flag → state → empty.
+		wcState := loadState()
+		ucMetrics := wcState.OtelMetricsTable
+		ucLogs := wcState.OtelLogsTable
+		ucTraces := wcState.OtelTracesTable
+		if a.OTELMetricsTableSet {
+			ucMetrics = a.OTELMetricsTable
+		}
+		if a.OTELLogsTableSet {
+			ucLogs = a.OTELLogsTable
+		} else if ucLogs == "" && ucMetrics != "" {
+			ucLogs = deriveLogsTable(ucMetrics)
+		}
+		if a.OTELTracesTableSet {
+			ucTraces = a.OTELTracesTable
+		}
+
+		// Persist any newly-set table names.
+		{
+			mutated := false
+			if a.OTELMetricsTableSet && wcState.OtelMetricsTable != ucMetrics {
+				wcState.OtelMetricsTable = ucMetrics
+				mutated = true
+			}
+			if a.OTELLogsTableSet && wcState.OtelLogsTable != ucLogs {
+				wcState.OtelLogsTable = ucLogs
+				mutated = true
+			}
+			if a.OTELTracesTableSet && wcState.OtelTracesTable != ucTraces {
+				wcState.OtelTracesTable = ucTraces
+				mutated = true
+			}
+			if mutated {
+				if err := saveState(wcState); err != nil {
+					log.Fatalf("databricks-claude: could not persist OTEL tables: %v", err)
+				}
+			}
+		}
+
+		// Build otelEnv — always needsFullSetup (the whole point of this flag).
+		wcOtelEnv := map[string]string{}
+		if ucMetrics != "" {
+			wcOtelEnv["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"] = wcProxyURL + "/otel/v1/metrics"
+			wcOtelEnv["OTEL_EXPORTER_OTLP_METRICS_HEADERS"] = "content-type=application/x-protobuf"
+			wcOtelEnv["OTEL_METRICS_EXPORTER"] = "otlp"
+			wcOtelEnv["OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"] = "http/protobuf"
+			wcOtelEnv["OTEL_METRIC_EXPORT_INTERVAL"] = "10000"
+			wcOtelEnv["CLAUDE_OTEL_UC_METRICS_TABLE"] = ucMetrics
+		}
+		if ucLogs != "" {
+			wcOtelEnv["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] = wcProxyURL + "/otel/v1/logs"
+			wcOtelEnv["OTEL_EXPORTER_OTLP_LOGS_HEADERS"] = "content-type=application/x-protobuf"
+			wcOtelEnv["OTEL_EXPORTER_OTLP_LOGS_PROTOCOL"] = "http/protobuf"
+			wcOtelEnv["OTEL_LOGS_EXPORTER"] = "otlp"
+			wcOtelEnv["OTEL_LOGS_EXPORT_INTERVAL"] = "5000"
+			wcOtelEnv["CLAUDE_OTEL_UC_LOGS_TABLE"] = ucLogs
+		}
+		if ucTraces != "" {
+			wcOtelEnv["CLAUDE_CODE_ENHANCED_TELEMETRY_BETA"] = "1"
+			wcOtelEnv["OTEL_TRACES_EXPORTER"] = "otlp"
+			wcOtelEnv["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = wcProxyURL + "/otel/v1/traces"
+			wcOtelEnv["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] = "http/protobuf"
+			wcOtelEnv["OTEL_TRACES_EXPORT_INTERVAL"] = "5000"
+			wcOtelEnv["CLAUDE_OTEL_UC_TRACES_TABLE"] = ucTraces
+		}
+		if ucMetrics != "" || ucLogs != "" || ucTraces != "" {
+			wcOtelEnv["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
+		}
+		for k, v := range databricksFullSetupEnv() {
+			wcOtelEnv[k] = v
+		}
+
+		// Resolve --with-websearch settings and persist to state so the
+		// daemon (and any subsequent wrapper invocation) picks them up.
+		// Websearch is a PROXY-side feature controlled by state, NOT by
+		// the settings.json env block — so no key is added to wcOtelEnv;
+		// the state file is the entire integration point. Mirrors the
+		// normal-startup persistence block. Reload state here so we pick
+		// up any OTEL writes from above.
+		wcWsState := loadState()
+		wcWithWebSearch := wcWsState.WithWebSearch
+		wcWsBackend := wcWsState.WebSearchBackend
+		wcWsBudget := wcWsState.WebSearchFetchBudget
+		if a.WithWebSearchSet {
+			wcWithWebSearch = a.WithWebSearch
+		}
+		if a.WebSearchBackendSet {
+			wcWsBackend = a.WebSearchBackend
+		}
+		if a.WebSearchFetchBudgetSet {
+			wcWsBudget = a.WebSearchFetchBudget
+		}
+		{
+			mutated := false
+			if a.WithWebSearchSet && wcWsState.WithWebSearch != wcWithWebSearch {
+				wcWsState.WithWebSearch = wcWithWebSearch
+				mutated = true
+			}
+			if a.WebSearchBackendSet && wcWsState.WebSearchBackend != wcWsBackend {
+				wcWsState.WebSearchBackend = wcWsBackend
+				mutated = true
+			}
+			if a.WebSearchFetchBudgetSet && wcWsState.WebSearchFetchBudget != wcWsBudget {
+				wcWsState.WebSearchFetchBudget = wcWsBudget
+				mutated = true
+			}
+			if mutated {
+				if err := saveState(wcWsState); err != nil {
+					log.Fatalf("databricks-claude: could not persist websearch state: %v", err)
+				}
+			}
+		}
+
+		if err := bootstrapSettings(a.Port, wcProfile, wcProxyURL, wcOtelEnv); err != nil {
+			log.Fatalf("databricks-claude: --write-claude-config: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "databricks-claude: wrote env block to ~/.claude/settings.json (profile=%s, base_url=%s, websearch=%t)\n", wcProfile, wcProxyURL, wcWithWebSearch)
 		os.Exit(0)
 	}
 
@@ -737,12 +878,9 @@ func main() {
 	_ = otelConfigured
 	if needsFullSetup {
 		// Also write Databricks-specific keys for full setup.
-		otelEnv["ANTHROPIC_MODEL"] = "databricks-claude-opus-4-7"
-		otelEnv["ANTHROPIC_DEFAULT_OPUS_MODEL"] = "databricks-claude-opus-4-7"
-		otelEnv["ANTHROPIC_DEFAULT_SONNET_MODEL"] = "databricks-claude-sonnet-4-6"
-		otelEnv["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = "databricks-claude-haiku-4-5"
-		otelEnv["ANTHROPIC_CUSTOM_HEADERS"] = "x-databricks-use-coding-agent-mode: true"
-		otelEnv["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = "1"
+		for k, v := range databricksFullSetupEnv() {
+			otelEnv[k] = v
+		}
 	}
 
 	if err := bootstrapSettings(a.Port, resolvedProfile, proxyURL, otelEnv); err != nil {
@@ -970,6 +1108,8 @@ func parseArgs(args []string) (*Args, error) {
 					}
 				case "--headless":
 					a.Headless = true
+				case "--write-claude-config":
+					a.WriteClaudeConfig = true
 				case "--install-hooks":
 					a.InstallHooks = true
 				case "--uninstall-hooks":
@@ -1069,6 +1209,12 @@ Databricks-Claude Flags:
   --tls-key string             Path to TLS private key file (requires --tls-cert)
   --port int                   Fixed proxy port (default: 49153, saved to state)
   --headless                   Start proxy without launching claude (for IDE extensions)
+  --write-claude-config        Write first-run settings.json env block (proxy URL, model
+                               routing, custom headers) and exit — no proxy startup, no
+                               port binding, no child process. Designed for MDM / fleet
+                               init scripts and as a cleaner alternative to the
+                               '--headless then Ctrl+C' workaround. Idempotent.
+                               Accepts --profile, --port, and OTEL table flags.
   --headless-ensure            Start proxy if not running (called by SessionStart hook)
   --headless-release           Decrement proxy refcount (called by Stop hook)
   --idle-timeout duration      Idle timeout for headless mode (default 30m, 0 disables; use e.g. 30s, 5m, 1h)
@@ -1123,6 +1269,27 @@ Passthrough to claude:
     databricks-claude -- --help                # show claude's own help
     databricks-claude -- --model opus -p "hi"  # run claude with extra flags
 `, Version)
+}
+
+// databricksFullSetupEnv returns the Databricks-specific env keys written
+// during a "full setup" bootstrap (first-run, --write-claude-config, etc.).
+// These cover model routing, the coding-agent-mode custom header, and the
+// experimental-betas opt-out. Kept as a single source of truth so the
+// --write-claude-config flag and the normal startup flow can never drift —
+// regressions deleting any key fail the integration tests that assert
+// against this map.
+//
+// Model names are versioned and drift as Databricks ships new models;
+// bumping them here is the right place.
+func databricksFullSetupEnv() map[string]string {
+	return map[string]string{
+		"ANTHROPIC_MODEL":                        "databricks-claude-opus-4-7",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL":           "databricks-claude-opus-4-7",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL":         "databricks-claude-sonnet-4-6",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL":          "databricks-claude-haiku-4-5",
+		"ANTHROPIC_CUSTOM_HEADERS":               "x-databricks-use-coding-agent-mode: true",
+		"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+	}
 }
 
 // buildUpdaterConfig returns the standard updater.Config for databricks-claude.
