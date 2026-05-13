@@ -27,7 +27,11 @@ const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <string>--profile={{escapeXML .Profile}}</string>
     <string>--log-file={{escapeXML .LogFile}}</string>{{range .OtelArgs}}
     <string>{{escapeXML .}}</string>{{end}}
-  </array>
+  </array>{{if .CLIPath}}
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DATABRICKS_CLI</key><string>{{escapeXML .CLIPath}}</string>
+  </dict>{{end}}
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key>
   <dict><key>SuccessfulExit</key><false/></dict>
@@ -46,6 +50,13 @@ type plistData struct {
 	LogFile  string
 	HomeDir  string
 	OtelArgs []string
+	// CLIPath, when non-empty, is rendered into an EnvironmentVariables
+	// dict block as DATABRICKS_CLI=<abs-path>. launchd inherits a minimal
+	// PATH (essentially /usr/bin:/bin:/usr/sbin:/sbin) that often misses
+	// brew installs at /opt/homebrew/bin or /usr/local/bin/databricks
+	// symlinks; pinning the absolute path avoids "databricks: command not
+	// found" failures in the daemon under launchd's restricted PATH.
+	CLIPath string
 }
 
 // escapeXML replaces XML special characters in a string.
@@ -83,6 +94,7 @@ func renderPlist(opts installOptions) (string, error) {
 		LogFile:  opts.logFile,
 		HomeDir:  home,
 		OtelArgs: otelArgs,
+		CLIPath:  opts.cliPath,
 	}
 
 	funcMap := template.FuncMap{"escapeXML": escapeXML}
@@ -245,6 +257,12 @@ func daemonStatus(port int) (statusResult, error) {
 	}
 
 	// Running: launchctl print exit 0 AND output contains "state = running".
+	// We also extract the last exit code to detect crash-loops: a unit that
+	// has Restart=on-failure semantics under launchd (KeepAlive +
+	// SuccessfulExit=false) can briefly show state=running between respawns
+	// while its actual previous exit code is non-zero. Treating last-exit
+	// non-zero as Failed=true gives the symmetric status accuracy fix for
+	// the Linux crash-loop masking bug.
 	printCmd := exec.Command("launchctl", "print", launchctlDomain())
 	out, err := printCmd.Output()
 	if err == nil {
@@ -256,7 +274,12 @@ func daemonStatus(port int) (statusResult, error) {
 		for _, line := range strings.Split(s, "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "last exit code = ") {
-				r.LastExitCode = strings.TrimPrefix(line, "last exit code = ")
+				code := strings.TrimPrefix(line, "last exit code = ")
+				if code != "" && code != "0" && code != "(never exited)" {
+					r.LastExitCode = code
+					r.Failed = true
+					r.Running = false
+				}
 			}
 		}
 		// Extract binary path from program arguments.
@@ -272,4 +295,50 @@ func daemonStatus(port int) (statusResult, error) {
 	r.Healthy, r.HealthMode, r.Version, r.Profile = probeHealth(port)
 
 	return r, nil
+}
+
+// diagnosticsTail returns recent launchd state + stderr log tail for the
+// daemon to aid post-install probe failure diagnosis. Returns ("", nil) when
+// neither source produced useful output — callers treat empty as "no
+// diagnostics available" and continue.
+func diagnosticsTail() (string, error) {
+	var parts []string
+
+	// launchctl print is the single richest source of launchd state info
+	// (last exit, state machine, recent spawns); take its full output.
+	printCmd := exec.Command("launchctl", "print", launchctlDomain())
+	if out, err := printCmd.Output(); err == nil && len(out) > 0 {
+		parts = append(parts, "launchctl print:\n"+strings.TrimSpace(string(out)))
+	}
+
+	// Also tail the daemon's stderr log file if we can guess its path. The
+	// default lives under ~/Library/Logs/databricks-claude-daemon/serve.log;
+	// the actual path is overridable at install time, so we read the plist
+	// to find StandardErrorPath.
+	if plist, err := plistPath(); err == nil {
+		if data, err := os.ReadFile(plist); err == nil {
+			s := string(data)
+			// crude scan for <key>StandardErrorPath</key><string>PATH</string>
+			marker := "<key>StandardErrorPath</key>"
+			if idx := strings.Index(s, marker); idx >= 0 {
+				tail := s[idx+len(marker):]
+				if openIdx := strings.Index(tail, "<string>"); openIdx >= 0 {
+					tail = tail[openIdx+len("<string>"):]
+					if closeIdx := strings.Index(tail, "</string>"); closeIdx >= 0 {
+						logPath := strings.TrimSpace(tail[:closeIdx])
+						if logData, err := os.ReadFile(logPath); err == nil {
+							lines := strings.Split(strings.TrimRight(string(logData), "\n"), "\n")
+							start := len(lines) - 50
+							if start < 0 {
+								start = 0
+							}
+							parts = append(parts, "stderr log tail ("+logPath+"):\n"+strings.Join(lines[start:], "\n"))
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return strings.Join(parts, "\n\n"), nil
 }

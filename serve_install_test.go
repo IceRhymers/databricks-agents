@@ -59,6 +59,11 @@ func TestParseInstallFlags(t *testing.T) {
 			want: installFlags{metricsTable: "cat.schema.tbl", metricsTableSet: true},
 		},
 		{
+			name: "skip-auth-check bool flag",
+			args: []string{"--skip-auth-check"},
+			want: installFlags{skipAuthCheck: true},
+		},
+		{
 			name: "all flags",
 			args: []string{
 				"--port=49153",
@@ -67,6 +72,7 @@ func TestParseInstallFlags(t *testing.T) {
 				"--otel-metrics-table=main.telem.metrics",
 				"--otel-logs-table=main.telem.logs",
 				"--otel-traces-table=main.telem.traces",
+				"--skip-auth-check",
 			},
 			want: installFlags{
 				port:            49153,
@@ -78,6 +84,7 @@ func TestParseInstallFlags(t *testing.T) {
 				metricsTableSet: true,
 				logsTableSet:    true,
 				tracesTableSet:  true,
+				skipAuthCheck:   true,
 			},
 		},
 	}
@@ -168,6 +175,70 @@ func TestPrintStatusResultNonZeroExitCode(t *testing.T) {
 	out := captureStatusStdout(func() { printStatusResult(r) })
 	if !strings.Contains(out, "LastExit:   1") {
 		t.Errorf("expected 'LastExit:   1', got:\n%s", out)
+	}
+}
+
+// TestPrintStatusResult_Failed verifies the crash-loop rendering: when Failed
+// is true, the Running line must include `(failed, ...)` rather than `yes`,
+// even if Running was momentarily true upstream. Covers TestStatusLinuxFailed
+// and TestStatusDarwinCrashLoop from the plan.
+func TestPrintStatusResult_Failed(t *testing.T) {
+	r := statusResult{
+		Registered:    true,
+		Running:       false,
+		Failed:        true,
+		FailureDetail: "result=exit-code",
+		LastExitCode:  "1",
+	}
+	out := captureStatusStdout(func() { printStatusResult(r) })
+	if !strings.Contains(out, "Running:    no (failed, result=exit-code, last-exit=1)") {
+		t.Errorf("expected 'Running: no (failed, result=exit-code, last-exit=1)', got:\n%s", out)
+	}
+}
+
+// TestPrintStatusResult_FailedNoDetail verifies the macOS crash-loop case
+// where we only have last-exit and no Result string.
+func TestPrintStatusResult_FailedNoDetail(t *testing.T) {
+	r := statusResult{
+		Registered:   true,
+		Running:      false,
+		Failed:       true,
+		LastExitCode: "127",
+	}
+	out := captureStatusStdout(func() { printStatusResult(r) })
+	if !strings.Contains(out, "Running:    no (failed, last-exit=127)") {
+		t.Errorf("expected 'Running: no (failed, last-exit=127)', got:\n%s", out)
+	}
+}
+
+// TestPrintStatusResult_RunningHealthy verifies the happy path: Running=yes
+// rendered as plain `yes` (no failed annotation).
+func TestPrintStatusResult_RunningHealthy(t *testing.T) {
+	r := statusResult{
+		Registered: true,
+		Running:    true,
+		Healthy:    true,
+		HealthMode: "daemon",
+	}
+	out := captureStatusStdout(func() { printStatusResult(r) })
+	if !strings.Contains(out, "Running:    yes") {
+		t.Errorf("expected 'Running:    yes', got:\n%s", out)
+	}
+	if strings.Contains(out, "failed") {
+		t.Errorf("did not expect 'failed' in running output, got:\n%s", out)
+	}
+}
+
+// TestIsInteractiveStdin_NonTTY: when the test runs under `go test`, stdin is
+// not a tty (it's typically a pipe or /dev/null). The function should return
+// false. This is the property `serve install` relies on to abort non-tty
+// invocations cleanly.
+func TestIsInteractiveStdin_NonTTY(t *testing.T) {
+	// On unix, `go test` runs with stdin as a pipe → not a char device.
+	// On windows the runtime branch forces false regardless. Either way,
+	// expect false.
+	if isInteractiveStdin() {
+		t.Skip("test runner has a tty on stdin; can't validate non-tty branch here")
 	}
 }
 

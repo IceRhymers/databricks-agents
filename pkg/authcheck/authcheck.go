@@ -65,3 +65,21 @@ func EnsureAuthenticatedWithStdout(profile, cmdName string, w io.Writer) error {
 func EnsureAuthenticated(profile, cmdName string) error {
 	return EnsureAuthenticatedWithStdout(profile, cmdName, os.Stdout)
 }
+
+// EnsureOrCheck verifies auth for profile. If interactive is true and the CLI
+// lacks a valid token, prompts the user via `databricks auth login`. If
+// interactive is false, returns a non-nil error instead of prompting — this is
+// the mode `serve install` and other daemon-adjacent call sites use when stdin
+// is not a tty: they fail loudly at the boundary rather than launching a
+// browser flow that has nowhere to land.
+// cmdName is the resolved Databricks CLI binary name or path; pass "" to use
+// the default ("databricks").
+func EnsureOrCheck(profile, cmdName string, interactive bool) error {
+	if IsAuthenticated(profile, cmdName) {
+		return nil
+	}
+	if !interactive {
+		return fmt.Errorf("profile %q is not authenticated and stdin is not a tty (run `databricks auth login --profile %s` first, or pass --skip-auth-check to defer)", profile, profile)
+	}
+	return EnsureAuthenticated(profile, cmdName)
+}

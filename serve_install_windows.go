@@ -146,3 +146,13 @@ func parseSchtasksStatus(data []byte) string {
 	}
 	return strings.TrimSpace(records[1][statusCol])
 }
+
+// diagnosticsTail is a Windows stub. Schtasks has no equivalent of journalctl
+// or `launchctl print` that's both reliable and ad-hoc; the daemon's stderr
+// log file (resolved per-OS via defaultLogFile) is the canonical place to
+// look. Returning "not implemented" here is preferable to returning ("", nil)
+// because the install path emits a non-empty diagnostics banner verbatim, and
+// "not implemented" tells the human running install where to look manually.
+func diagnosticsTail() (string, error) {
+	return "not implemented on Windows; check the daemon stderr log file (set via --log-file or per-OS default under %LOCALAPPDATA%/databricks-claude-daemon/serve.log)", nil
+}

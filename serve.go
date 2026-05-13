@@ -229,9 +229,16 @@ func runServe(args []string) {
 		}
 	}
 
-	// Ensure authenticated before binding the port (interactive browser login may be needed).
-	if err := authcheck.EnsureAuthenticated(resolvedProfile, ""); err != nil {
-		log.Fatalf("databricks-claude: serve: auth failed: %v", err)
+	// Daemon-safe auth: never prompt. The interactive login flow is owned by
+	// `serve install` at install time (where stdin is a real tty). If the
+	// daemon was started directly (systemctl --user start / launchctl
+	// kickstart / schtasks /run) without prior auth, fail loudly here rather
+	// than spawning a browser prompt under a service manager with no tty —
+	// which would crash-loop until the systemd start-limit gives up.
+	if !authcheck.IsAuthenticated(resolvedProfile, "") {
+		log.Fatalf("databricks-claude: serve: profile %q is not authenticated — daemon cannot prompt; "+
+			"run `databricks-claude serve install` from a tty or `databricks auth login --profile %s` first",
+			resolvedProfile, resolvedProfile)
 	}
 
 	// Discover workspace host and construct the AI Gateway URL.

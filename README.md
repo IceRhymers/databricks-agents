@@ -478,6 +478,21 @@ Optional flags for `serve install`:
 - `--port <int>` — proxy port (default: 49153)
 - `--log-file <path>` — log file path (default: per-OS, e.g. `~/Library/Logs/databricks-claude-daemon/serve.log`)
 - `--otel-metrics-table`, `--otel-logs-table`, `--otel-traces-table` — OTEL UC tables
+- `--skip-auth-check` — skip the install-time auth probe (required for CI / MDM init scripts where stdin is not a tty and `databricks auth login` cannot prompt)
+
+#### Install-time authentication
+
+By default, `serve install` verifies that the resolved profile has a valid Databricks token **before** writing any service-manager manifest. Behaviour:
+
+- **Interactive tty + authed**: install proceeds silently.
+- **Interactive tty + not authed**: runs `databricks auth login --profile <name>` to prompt the browser flow, then proceeds.
+- **Non-tty + not authed**: aborts with an actionable error before writing any unit file. The daemon path is non-interactive (it cannot pop a browser under systemd/launchd/schtasks), so writing a unit that's guaranteed to crash-loop would be worse than failing fast.
+- **Non-tty + authed**: install proceeds silently.
+- **`--skip-auth-check`**: bypass the probe entirely. The unit is written immediately; the daemon will refuse to start until `databricks auth login --profile <name>` has been run separately. Use this in MDM fleet init scripts where auth is seeded out-of-band.
+
+After install, a `/health` probe runs against `127.0.0.1:<port>` with a 10-second deadline to verify the daemon actually came up healthy. On timeout, the install command surfaces a diagnostics tail (`journalctl --user` on Linux, `launchctl print` plus the daemon stderr log on macOS) to stderr — but **does not auto-uninstall**. The unit file stays put so you can debug it. Re-running `serve install` is idempotent.
+
+**Limitation**: install must be run as the user the daemon will run as. Running `sudo databricks-claude serve install` writes a systemd unit owned by root or a LaunchAgent under `/Library/LaunchAgents`, neither of which is what the per-user `serve` design intends. MDM fleet rollouts that need cross-user install are out of scope for this command; deploy a system-wide LaunchDaemon or systemd system unit manually if you need that.
 
 #### Status / removal
 

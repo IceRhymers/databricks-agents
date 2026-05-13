@@ -145,6 +145,84 @@ func TestPlutilLint(t *testing.T) {
 	}
 }
 
+// TestRenderPlist_DATABRICKS_CLI_EnvSet verifies that a non-empty cliPath
+// renders an EnvironmentVariables dict containing DATABRICKS_CLI=<abs-path>.
+// This is the launchd-side fix for the brew PATH bug: launchd's minimal PATH
+// (/usr/bin:/bin:/usr/sbin:/sbin) doesn't include /opt/homebrew/bin so the
+// daemon can't find the databricks CLI without an absolute pin.
+func TestRenderPlist_DATABRICKS_CLI_EnvSet(t *testing.T) {
+	opts := installOptions{
+		binPath: "/usr/local/bin/databricks-claude",
+		port:    49153,
+		profile: "prod",
+		logFile: "/tmp/serve.log",
+		cliPath: "/opt/homebrew/bin/databricks",
+	}
+
+	out, err := renderPlist(opts)
+	if err != nil {
+		t.Fatalf("renderPlist error: %v", err)
+	}
+
+	for _, want := range []string{
+		"<key>EnvironmentVariables</key>",
+		"<key>DATABRICKS_CLI</key><string>/opt/homebrew/bin/databricks</string>",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("plist missing %q\nfull output:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderPlist_DATABRICKS_CLI_AbsentWhenEmpty verifies no EnvironmentVariables
+// block when cliPath is empty.
+func TestRenderPlist_DATABRICKS_CLI_AbsentWhenEmpty(t *testing.T) {
+	opts := installOptions{
+		binPath: "/usr/local/bin/databricks-claude",
+		port:    49153,
+		profile: "prod",
+		logFile: "/tmp/serve.log",
+	}
+
+	out, err := renderPlist(opts)
+	if err != nil {
+		t.Fatalf("renderPlist error: %v", err)
+	}
+	if strings.Contains(out, "EnvironmentVariables") {
+		t.Errorf("plist should not contain EnvironmentVariables when cliPath is empty\nfull output:\n%s", out)
+	}
+	if strings.Contains(out, "DATABRICKS_CLI") {
+		t.Errorf("plist should not contain DATABRICKS_CLI when cliPath is empty\nfull output:\n%s", out)
+	}
+}
+
+// TestRenderPlist_DATABRICKS_CLI_PlutilLint verifies the rendered plist with
+// EnvironmentVariables is still valid property-list XML.
+func TestRenderPlist_DATABRICKS_CLI_PlutilLint(t *testing.T) {
+	if _, err := exec.LookPath("plutil"); err != nil {
+		t.Skip("plutil not available")
+	}
+	opts := installOptions{
+		binPath: "/usr/local/bin/databricks-claude",
+		port:    49153,
+		profile: "prod",
+		logFile: "/tmp/serve.log",
+		cliPath: "/opt/homebrew/bin/databricks",
+	}
+	out, err := renderPlist(opts)
+	if err != nil {
+		t.Fatalf("renderPlist error: %v", err)
+	}
+	tmpFile, err := createTempFile(t, "test-cli-*.plist", out)
+	if err != nil {
+		t.Fatalf("cannot create temp plist: %v", err)
+	}
+	cmd := exec.Command("plutil", "-lint", tmpFile)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Errorf("plutil -lint failed: %v\n%s\nPlist content:\n%s", err, output, out)
+	}
+}
+
 // createTempFile writes content to a temp file and returns its path.
 // The file is removed when the test ends.
 func createTempFile(t *testing.T, pattern, content string) (string, error) {

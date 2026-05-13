@@ -194,3 +194,124 @@ func TestEnsureAuthenticatedWithStdout_AlreadyAuthed(t *testing.T) {
 		t.Errorf("buffer should be empty when already authed; got %q", buf.String())
 	}
 }
+
+// TestEnsureOrCheck_AuthedInteractive verifies that when the profile is
+// already authenticated, EnsureOrCheck succeeds without spawning a login
+// subprocess regardless of the interactive flag.
+func TestEnsureOrCheck_AuthedInteractive(t *testing.T) {
+	origCtx := execCommandContext
+	origCmd := execCommand
+	defer func() {
+		execCommandContext = origCtx
+		execCommand = origCmd
+	}()
+
+	execCommandContext = fakeCommandContext(`{"access_token":"dapi-xxx"}`, false)
+	loginCalled := false
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		loginCalled = true
+		return exec.Command("false")
+	}
+
+	if err := EnsureOrCheck("DEFAULT", "", true); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if loginCalled {
+		t.Error("login subprocess should not be spawned when already authed")
+	}
+}
+
+// TestEnsureOrCheck_AuthedNonInteractive: same fast-path under non-interactive.
+func TestEnsureOrCheck_AuthedNonInteractive(t *testing.T) {
+	origCtx := execCommandContext
+	defer func() { execCommandContext = origCtx }()
+
+	execCommandContext = fakeCommandContext(`{"access_token":"dapi-xxx"}`, false)
+
+	if err := EnsureOrCheck("DEFAULT", "", false); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestEnsureOrCheck_UnauthedInteractive verifies that interactive mode falls
+// through to a real `databricks auth login` invocation when the token check
+// fails.
+func TestEnsureOrCheck_UnauthedInteractive(t *testing.T) {
+	origCtx := execCommandContext
+	origCmd := execCommand
+	defer func() {
+		execCommandContext = origCtx
+		execCommand = origCmd
+	}()
+
+	// EnsureOrCheck → IsAuthenticated (false) → EnsureAuthenticated →
+	// EnsureAuthenticatedWithStdout → IsAuthenticated (false) → login →
+	// IsAuthenticated (true). Three IsAuthenticated calls total.
+	callCount := 0
+	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		callCount++
+		if callCount < 3 {
+			return exec.CommandContext(ctx, "false")
+		}
+		return exec.CommandContext(ctx, "echo", `{"access_token":"dapi-xxx"}`)
+	}
+	loginCalled := false
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		loginCalled = true
+		return exec.Command("echo", "login ok")
+	}
+
+	if err := EnsureOrCheck("DEFAULT", "", true); err != nil {
+		t.Fatalf("expected success after interactive login, got: %v", err)
+	}
+	if !loginCalled {
+		t.Error("interactive mode should spawn `databricks auth login` when unauthed")
+	}
+}
+
+// TestEnsureOrCheck_UnauthedNonInteractive: the daemon-safety property — when
+// stdin is not a tty, do NOT prompt; return an actionable error instead.
+func TestEnsureOrCheck_UnauthedNonInteractive(t *testing.T) {
+	origCtx := execCommandContext
+	origCmd := execCommand
+	defer func() {
+		execCommandContext = origCtx
+		execCommand = origCmd
+	}()
+
+	execCommandContext = fakeCommandContext("", true)
+	loginCalled := false
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		loginCalled = true
+		return exec.Command("false")
+	}
+
+	err := EnsureOrCheck("DEFAULT", "", false)
+	if err == nil {
+		t.Fatal("expected error in non-interactive mode when unauthed")
+	}
+	if loginCalled {
+		t.Error("non-interactive mode must NOT spawn `databricks auth login`")
+	}
+	// Error message should mention the actionable next step.
+	msg := err.Error()
+	if !strings.Contains(msg, "not authenticated") {
+		t.Errorf("error message missing 'not authenticated': %q", msg)
+	}
+	if !strings.Contains(msg, "databricks auth login") {
+		t.Errorf("error message missing remediation hint: %q", msg)
+	}
+}
+
+// TestEnsureOrCheck_CLINotFound verifies that a missing CLI binary is reported
+// as not-authenticated (IsAuthenticated returns false → non-interactive path
+// returns an error). This guards against the install path silently treating a
+// missing CLI as "no auth needed".
+func TestEnsureOrCheck_CLINotFound(t *testing.T) {
+	// Use real exec (no stub) against a definitely-missing binary so the
+	// underlying `databricks auth token` invocation truly fails.
+	err := EnsureOrCheck("DEFAULT", "/nonexistent/path/to/fake-databricks-binary", false)
+	if err == nil {
+		t.Error("expected error when CLI binary is missing in non-interactive mode")
+	}
+}

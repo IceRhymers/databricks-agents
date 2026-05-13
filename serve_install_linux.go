@@ -19,6 +19,9 @@ After=network-online.target
 
 [Service]
 Type=simple
+{{- if .CLIPath}}
+Environment=DATABRICKS_CLI={{.CLIPath}}
+{{- end}}
 ExecStart={{.BinPath}} serve --port={{.Port}} --profile={{.Profile}} --log-file={{.LogFile}}{{.OtelFlags}}
 Restart=on-failure
 RestartSec=5
@@ -33,6 +36,11 @@ type unitData struct {
 	Profile   string
 	LogFile   string
 	OtelFlags string
+	// CLIPath, when non-empty, is rendered as Environment=DATABRICKS_CLI=...
+	// so the daemon's TokenProvider can find the `databricks` binary even
+	// when systemd's minimal PATH (/usr/local/bin:/usr/bin) doesn't include
+	// the install location (e.g. Linuxbrew at /home/linuxbrew/.linuxbrew/bin).
+	CLIPath string
 }
 
 // renderUnit renders the systemd unit file content for the given installOptions.
@@ -59,6 +67,7 @@ func renderUnit(opts installOptions) (string, error) {
 		Profile:   opts.profile,
 		LogFile:   opts.logFile,
 		OtelFlags: otelFlags,
+		CLIPath:   opts.cliPath,
 	}
 
 	tmpl, err := template.New("unit").Parse(unitTemplate)
@@ -198,6 +207,49 @@ func daemonStatus(port int) (statusResult, error) {
 		r.Running = true
 	}
 
+	// Failed: systemctl --user is-failed exits 0 when the unit is in the
+	// "failed" state. Combined with `systemctl show --property=Result,
+	// ExecMainStatus` we get the structured failure reason. This is the
+	// fix for the crash-loop masking bug — without it, a unit that's
+	// restart-looping shows `Running: yes` momentarily because is-active
+	// briefly returns "activating" between respawns and `is-failed` is
+	// the only reliable way to detect the start-limit-hit terminal state.
+	failedCmd := exec.Command("systemctl", "--user", "is-failed", daemonServiceName+".service")
+	if err := failedCmd.Run(); err == nil {
+		r.Failed = true
+		r.Running = false
+	}
+
+	// Pull Result + ExecMainStatus from systemctl show. Even when not in
+	// the terminal "failed" state, a non-success Result on a crash-looping
+	// unit is informative; surface both via FailureDetail/LastExitCode.
+	showCmd := exec.Command("systemctl", "--user", "show", daemonServiceName+".service",
+		"--property=Result", "--property=ExecMainStatus")
+	if out, err := showCmd.Output(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			line = strings.TrimSpace(line)
+			switch {
+			case strings.HasPrefix(line, "Result="):
+				result := strings.TrimPrefix(line, "Result=")
+				if result != "" && result != "success" {
+					r.FailureDetail = "result=" + result
+					// A non-success Result without is-failed=true can
+					// happen mid-restart-loop; still mark as failed so the
+					// renderer flags it.
+					if result != "success" {
+						r.Failed = true
+						r.Running = false
+					}
+				}
+			case strings.HasPrefix(line, "ExecMainStatus="):
+				code := strings.TrimPrefix(line, "ExecMainStatus=")
+				if code != "" && code != "0" {
+					r.LastExitCode = code
+				}
+			}
+		}
+	}
+
 	// Populate BinaryPath by reading the unit file if it exists.
 	if data, err := os.ReadFile(unit); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
@@ -215,4 +267,20 @@ func daemonStatus(port int) (statusResult, error) {
 	r.Healthy, r.HealthMode, r.Version, r.Profile = probeHealth(port)
 
 	return r, nil
+}
+
+// diagnosticsTail returns the last 50 lines of the daemon's journal entries
+// for failure diagnosis. Returns ("", nil) if journalctl is unavailable or
+// produces no output — callers should treat empty output as "no diagnostics
+// available" rather than an error.
+func diagnosticsTail() (string, error) {
+	cmd := exec.Command("journalctl", "--user", "-u", daemonServiceName+".service",
+		"-n", "50", "--no-pager")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// journalctl missing or refused; not an error worth surfacing — the
+		// install path treats empty as "no diagnostics" and continues.
+		return "", nil
+	}
+	return strings.TrimSpace(string(out)), nil
 }

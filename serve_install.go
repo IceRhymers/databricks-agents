@@ -7,7 +7,10 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/IceRhymers/databricks-claude/pkg/authcheck"
+	"github.com/IceRhymers/databricks-claude/pkg/cli"
 	"github.com/IceRhymers/databricks-claude/pkg/health"
 	"github.com/IceRhymers/databricks-claude/pkg/mdmprofile"
 )
@@ -23,6 +26,15 @@ type installOptions struct {
 	metricsTable string
 	logsTable    string
 	tracesTable  string
+	// cliPath is the absolute path to the `databricks` CLI baked into the
+	// service manifest via $DATABRICKS_CLI. Service managers (systemd user
+	// units, launchd, schtasks) inherit a minimal PATH that often misses
+	// non-standard install locations (e.g. Linuxbrew at
+	// /home/linuxbrew/.linuxbrew/bin/databricks), so we resolve once at
+	// install time and pin the absolute path in the manifest environment.
+	// Empty when the CLI was not found at install time — the daemon will
+	// fall back to PATH lookup + cli.FallbackCLIDirs.
+	cliPath string
 }
 
 // statusResult carries what daemonStatus() discovered on the current OS.
@@ -36,6 +48,16 @@ type statusResult struct {
 	ManifestPath string
 	BinaryPath   string // binary path baked into the manifest
 	LastExitCode string
+	// Failed is set when the service-manager reports the unit/agent/task as
+	// failed (systemd "failed"/non-zero Result, launchd non-zero last exit,
+	// or schtasks "Could not start"). When true, the human-friendly status
+	// renderer emits `Running: no (failed, ...)` so a crash-loop is visible
+	// instead of being masked by a momentarily-true `state = running` read.
+	Failed bool
+	// FailureDetail is a short, parseable summary of the failure (e.g.
+	// `result=exit-code` on systemd or empty when no extra detail is
+	// available beyond LastExitCode).
+	FailureDetail string
 }
 
 // defaultLogFile returns the per-OS default log file path for the daemon.
@@ -93,6 +115,10 @@ type installFlags struct {
 	metricsTableSet bool
 	logsTableSet    bool
 	tracesTableSet  bool
+	// skipAuthCheck bypasses the install-time pre-auth probe. Used by CI,
+	// MDM fleet init scripts, and any context where the install command
+	// shouldn't fail just because the workspace has no cached token yet.
+	skipAuthCheck bool
 }
 
 // parseInstallFlags parses the args slice for 'serve install' flags.
@@ -138,9 +164,32 @@ func parseInstallFlags(args []string) installFlags {
 		case strings.HasPrefix(arg, "--otel-traces-table="):
 			f.tracesTable = strings.TrimPrefix(arg, "--otel-traces-table=")
 			f.tracesTableSet = true
+		case arg == "--skip-auth-check":
+			f.skipAuthCheck = true
 		}
 	}
 	return f
+}
+
+// isInteractiveStdin returns true when stdin appears to be a real tty. False
+// when stdin is a pipe, redirected file, or otherwise non-character-device —
+// the case we care about catching is `databricks-claude serve install` invoked
+// from an MDM init script or systemd unit, where any interactive prompt would
+// hang forever or fail outright.
+//
+// Windows note: os.ModeCharDevice semantics differ on Windows; we conservatively
+// treat Windows stdin as non-interactive so install must be paired with
+// --skip-auth-check when running under schtasks. Manual install from cmd.exe
+// works because the user can pre-run `databricks auth login` then re-run install.
+func isInteractiveStdin() bool {
+	if runtime.GOOS == "windows" {
+		return false
+	}
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 func runInstall(args []string) {
@@ -197,6 +246,45 @@ func runInstall(args []string) {
 		os.Exit(1)
 	}
 
+	// Resolve `databricks` CLI absolute path to bake into the service
+	// manifest's environment. The service manager's PATH is minimal (e.g.
+	// systemd --user PATH defaults to /usr/local/bin:/usr/local/sbin:/usr/
+	// bin:/usr/sbin which doesn't include Linuxbrew or ~/.local/bin); pinning
+	// $DATABRICKS_CLI ensures the daemon finds the same CLI the install ran.
+	cliPath := cli.ResolveDatabricksCLI(st.DatabricksCLIPath)
+	cliPathResolved := ""
+	if _, err := os.Stat(cliPath); err == nil {
+		// ResolveDatabricksCLI returned either a fallback dir hit or the
+		// $DATABRICKS_CLI override — both already absolute. If it returned
+		// "databricks" verbatim (PATH lookup), stat will fail; keep empty.
+		if filepath.IsAbs(cliPath) {
+			cliPathResolved = cliPath
+		}
+	}
+
+	// Install-time pre-auth gate.
+	//
+	// The daemon path itself is now non-interactive: runServe calls
+	// IsAuthenticated only, no browser fallback. That means the only
+	// reliable moment to seed a token is right here, before any unit file
+	// is written, while we still have a human and a tty.
+	//
+	// Behavior matrix:
+	//   --skip-auth-check       → bypass entirely (CI / MDM init scripts)
+	//   tty + unauthed          → prompt via `databricks auth login`
+	//   tty + authed            → no-op (fast path)
+	//   non-tty + unauthed      → abort with canonical error before write
+	//   non-tty + authed        → no-op
+	//   CLI not found + unauthed→ propagate IsAuthenticated=false → abort
+	//                             (cliPath empty; auth fails identically)
+	if !f.skipAuthCheck {
+		interactive := isInteractiveStdin()
+		if err := authcheck.EnsureOrCheck(profile, cliPathResolved, interactive); err != nil {
+			fmt.Fprintf(os.Stderr, "databricks-claude: serve install: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	opts := installOptions{
 		binPath:      binPath,
 		port:         port,
@@ -205,6 +293,7 @@ func runInstall(args []string) {
 		metricsTable: resolvedMetrics,
 		logsTable:    resolvedLogs,
 		tracesTable:  resolvedTraces,
+		cliPath:      cliPathResolved,
 	}
 
 	if err := installDaemon(opts); err != nil {
@@ -212,13 +301,44 @@ func runInstall(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Fprintf(os.Stderr, "databricks-claude: daemon installed and started\n")
+	// Post-install /health probe with 10s deadline. Service managers report
+	// "started" before the process is actually serving; without this probe,
+	// a crash-loop would silently pass install and only show up later in
+	// `serve status` or when the next Claude Code session tried to connect.
+	healthy := waitForHealth(port, 10*time.Second)
+	if healthy {
+		fmt.Fprintf(os.Stderr, "databricks-claude: daemon installed and healthy at 127.0.0.1:%d\n", port)
+	} else {
+		fmt.Fprintln(os.Stderr, "databricks-claude: serve install: post-install probe timed out after 10s; daemon may still be starting — see diagnostics below")
+		if tail, _ := diagnosticsTail(); tail != "" {
+			fmt.Fprintln(os.Stderr, "--- daemon diagnostics ---")
+			fmt.Fprintln(os.Stderr, tail)
+			fmt.Fprintln(os.Stderr, "--- end diagnostics ---")
+		}
+	}
+
 	fmt.Fprintf(os.Stderr, "  Service: %s\n", daemonServiceName)
 	fmt.Fprintf(os.Stderr, "  Binary:  %s\n", binPath)
+	if cliPathResolved != "" {
+		fmt.Fprintf(os.Stderr, "  CLI:     %s\n", cliPathResolved)
+	}
 	fmt.Fprintf(os.Stderr, "  Profile: %s\n", profile)
 	fmt.Fprintf(os.Stderr, "  Port:    %d\n", port)
 	fmt.Fprintf(os.Stderr, "  Log:     %s\n", logFile)
 	fmt.Fprintf(os.Stderr, "\nRun 'databricks-claude serve status' to verify.\n")
+}
+
+// waitForHealth polls 127.0.0.1:<port>/health every 500ms until it returns
+// healthy or the deadline elapses. Returns true on success.
+func waitForHealth(port int, deadline time.Duration) bool {
+	stop := time.Now().Add(deadline)
+	for time.Now().Before(stop) {
+		if _, ok := health.ProxyMode(port, "http"); ok {
+			return true
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return false
 }
 
 func runUninstall(args []string) {
@@ -265,7 +385,25 @@ func printStatusResult(r statusResult) {
 
 	fmt.Printf("Service:    %s\n", daemonServiceName)
 	fmt.Printf("Registered: %s\n", boolStr(r.Registered))
-	fmt.Printf("Running:    %s\n", boolStr(r.Running))
+
+	// Running rendering — if the service-manager reports a failed state,
+	// surface that explicitly so a crash-loop can't be masked by a
+	// momentarily-true `state = running` read. The Linux daemonStatus sets
+	// Failed when systemd `is-failed` succeeds or Result != "success"; the
+	// darwin daemonStatus sets it when launchctl reports a non-zero last
+	// exit code. Either way we want Running=no with the failure detail.
+	runStr := boolStr(r.Running)
+	if r.Failed {
+		parts := []string{"failed"}
+		if r.FailureDetail != "" {
+			parts = append(parts, r.FailureDetail)
+		}
+		if r.LastExitCode != "" && r.LastExitCode != "0" {
+			parts = append(parts, "last-exit="+r.LastExitCode)
+		}
+		runStr = "no (" + strings.Join(parts, ", ") + ")"
+	}
+	fmt.Printf("Running:    %s\n", runStr)
 
 	healthStr := boolStr(r.Healthy)
 	if r.Healthy && r.HealthMode != "" {
@@ -353,7 +491,19 @@ Flags:
   --otel-metrics-table string  UC table for OTEL metrics (flag > state > MDM > empty)
   --otel-logs-table string     UC table for OTEL logs   (flag > state > MDM > empty)
   --otel-traces-table string   UC table for OTEL traces (flag > state > MDM > empty)
+  --skip-auth-check            Skip the install-time auth probe. Required when
+                               running from CI / MDM init / any non-tty context
+                               where 'databricks auth login' cannot prompt.
+                               Daemon will fail to start until auth is seeded
+                               separately via 'databricks auth login --profile'.
   --help, -h                   Show this help message
+
+Install-time auth: by default, 'serve install' verifies that the resolved
+profile has a valid Databricks token before writing any service-manager
+manifest. When stdin is a tty, an unauthenticated profile triggers the
+interactive 'databricks auth login' flow. When stdin is not a tty, the
+install aborts with an actionable error instead of writing a guaranteed-
+broken unit. Use --skip-auth-check to bypass this gate.
 
 macOS note: if the binary is unsigned, a Gatekeeper warning is printed but
 the install proceeds. Run 'xattr -dr com.apple.quarantine <binary>' or sign

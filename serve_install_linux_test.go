@@ -92,3 +92,57 @@ func TestRenderUnitOtelFlagsAbsentWhenEmpty(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderUnit_DATABRICKS_CLI_EnvSet verifies that a non-empty cliPath gets
+// rendered as Environment=DATABRICKS_CLI=<abs-path> inside the [Service] block.
+// This is the systemd-side fix for the Linuxbrew PATH bug: without it, the
+// daemon under systemd --user can't find a databricks binary at e.g.
+// /home/linuxbrew/.linuxbrew/bin/databricks because systemd's minimal PATH
+// doesn't include brew install dirs.
+func TestRenderUnit_DATABRICKS_CLI_EnvSet(t *testing.T) {
+	opts := installOptions{
+		binPath: "/usr/local/bin/databricks-claude",
+		port:    49153,
+		profile: "prod",
+		logFile: "/tmp/serve.log",
+		cliPath: "/home/linuxbrew/.linuxbrew/bin/databricks",
+	}
+
+	out, err := renderUnit(opts)
+	if err != nil {
+		t.Fatalf("renderUnit error: %v", err)
+	}
+
+	want := "Environment=DATABRICKS_CLI=/home/linuxbrew/.linuxbrew/bin/databricks"
+	if !strings.Contains(out, want) {
+		t.Errorf("unit missing %q\nfull output:\n%s", want, out)
+	}
+	// Environment line must appear inside the [Service] block, before
+	// ExecStart, so systemd parses it as belonging to the service unit.
+	serviceIdx := strings.Index(out, "[Service]")
+	execIdx := strings.Index(out, "ExecStart=")
+	envIdx := strings.Index(out, want)
+	if !(serviceIdx >= 0 && serviceIdx < envIdx && envIdx < execIdx) {
+		t.Errorf("Environment= must appear in [Service] block before ExecStart=\nfull output:\n%s", out)
+	}
+}
+
+// TestRenderUnit_DATABRICKS_CLI_AbsentWhenEmpty verifies that no Environment=
+// line is emitted when cliPath is empty (the default fallback).
+func TestRenderUnit_DATABRICKS_CLI_AbsentWhenEmpty(t *testing.T) {
+	opts := installOptions{
+		binPath: "/usr/local/bin/databricks-claude",
+		port:    49153,
+		profile: "prod",
+		logFile: "/tmp/serve.log",
+	}
+
+	out, err := renderUnit(opts)
+	if err != nil {
+		t.Fatalf("renderUnit error: %v", err)
+	}
+
+	if strings.Contains(out, "DATABRICKS_CLI") {
+		t.Errorf("unit should not contain DATABRICKS_CLI when cliPath is empty\nfull output:\n%s", out)
+	}
+}
