@@ -192,69 +192,32 @@ The `inferenceCredentialHelper` MDM key in the generated config points at `…/d
 
 ### MDM / fleet rollout
 
-For rolling this out to a fleet via Jamf, Kandji, Intune, etc., generate the config from a reference workstation with paths that match your endpoint layout:
+**Fleet rollout is documented end-to-end in the [Rollout Guide](#rollout-guide)** — helper-mode and daemon-mode walkthroughs, the signing prerequisite, per-endpoint setup, and verification. The path-pinning flags below are the ones you'll most often pass when generating artifacts from a reference workstation:
 
 ```bash
-# Bake fleet-wide paths into the generated config
 databricks-claude desktop generate-config \
-  --profile <name> \
+  --profile <fleet-profile> \
   --binary-path /usr/local/bin/databricks-claude-credential-helper \
   --databricks-cli-path /usr/local/bin/databricks
 ```
 
-- `--binary-path` is the absolute path of the credential-helper symlink (or hardlink/copy) on every target endpoint.
-- `--databricks-cli-path` pins the `databricks` CLI absolute path. It's persisted to `~/.claude/.databricks-claude.json` on the generating machine; admins should arrange for the same field to be set on every endpoint (either by running this command per-user, or by dropping the state file via the same MDM tooling).
+- `--binary-path` — absolute path of the credential-helper symlink (or hardlink/copy) on every target endpoint.
+- `--databricks-cli-path` — pins the `databricks` CLI absolute path, persisted to `~/.claude/.databricks-claude.json`.
 
-The packaging method (`.pkg` installer, custom `brew` formula, etc.) is responsible for ensuring `databricks-claude` and its `databricks-claude-credential-helper` symlink land at the paths you embed in the config.
-
-For fleet rollout via MDM using the signed `.pkg` installer, see [MDM deployment with signed `.pkg`](#mdm-deployment-with-signed-pkg-self-signed) below.
+The packaging method (`.pkg` installer, custom `brew` formula, etc.) is responsible for ensuring `databricks-claude` and its `databricks-claude-credential-helper` symlink land at the paths you embed in the config. For the signed `.pkg` route, see [MDM deployment with signed `.pkg`](#mdm-deployment-with-signed-pkg-self-signed) below.
 
 ### Daemon-mode (advanced)
 
-Pass `--daemon` to emit artifacts pointing Claude Desktop at a local `databricks-claude serve` daemon instead of the Databricks AI Gateway directly. Daemon-mode unlocks OTLP forwarding from Desktop (helper-mode cannot, as Anthropic ships no `otlpCredentialHelper`). Requires `databricks-claude serve install` on each endpoint. A full rollout guide is forthcoming — see #165. Helper-mode (no flag) remains the default and recommended path for most deployments.
+Pass `--daemon` to emit artifacts pointing Claude Desktop at a local `databricks-claude serve` daemon instead of the Databricks AI Gateway directly. Daemon-mode unlocks OTLP forwarding from Desktop (helper-mode cannot, as Anthropic ships no `otlpCredentialHelper`). Requires `databricks-claude serve install` on each endpoint. Helper-mode (no flag) remains the default and recommended path for most deployments.
 
 ```bash
 databricks-claude desktop generate-config --daemon \
-  --profile myws \
+  --profile <fleet-profile> \
   --port 49153 \
-  --daemon-fake-key my-fleet-key
+  --daemon-fake-key <fleet-key>
 ```
 
-#### Fleet rollout — per-user init script
-
-After your MDM policy deploys `databricks-claude.pkg` and the workspace `.mobileconfig`, run this user-scope init script (e.g. as a Jamf policy or Intune Win32 app triggered at login):
-
-```bash
-#!/bin/bash
-PROFILE="databricks-ai-inference"
-HOST="https://my-ai-workspace.cloud.databricks.com"
-databricks auth login --host "$HOST" --profile "$PROFILE"
-/usr/local/bin/databricks-claude setup --profile "$PROFILE"
-```
-
-`generate-config --for-pkg --profile databricks-ai-inference` bakes the same profile into the `.mobileconfig`'s `com.icerhymers.databricks-claude` MDM payload. The credential helper reads this payload on first launch — so if the user opens Claude Desktop before the init script runs, the helper can still resolve the correct workspace via MDM without a local state file.
-
-The `setup` subcommand is idempotent: re-running it when the user is already authenticated prints "Already authenticated" and exits 0. Use `--force` to re-run the browser login regardless.
-
-#### How recovery works
-
-Databricks OAuth refresh tokens live roughly 24 hours. When a token expires, Claude Desktop's next 55-second re-poll fires the credential helper. The helper recovers automatically:
-
-1. Tries `databricks auth token --profile <resolved>` — fails (token expired).
-2. Calls `databricks auth login --profile <resolved>` with the subprocess's stdout routed to stderr (Desktop's stdout watch is preserved). A browser window opens.
-3. The user completes the SSO flow (~30–60 seconds on a fast IdP).
-4. The helper retries `databricks auth token` — succeeds, emits the fresh token to stdout.
-5. Claude Desktop resumes with a fresh token.
-
-If the user takes more than 55 seconds to complete SSO, Desktop's TTL fires again. On the retry, the token cache is freshly warm and the second invocation is instant.
-
-To warm the cache proactively and avoid the browser-at-first-launch surprise:
-
-```bash
-/usr/local/bin/databricks-claude setup --profile databricks-ai-inference
-```
-
-This is what the fleet init script above does — running it before the user opens Desktop ensures the first credential-helper invocation hits the fast-path and returns a token without a browser prompt.
+Add `--otel` to also emit OTLP keys — the emitted `otlpEndpoint` carries a `/otel` path prefix so Claude Desktop's exporter lands on the daemon's telemetry route rather than its inference catch-all. See the **[Rollout Guide](#rollout-guide)** for the full daemon-mode walkthrough: per-endpoint daemon install, first-launch auth, and verification.
 
 ### MDM deployment with signed `.pkg` (self-signed)
 
@@ -315,6 +278,135 @@ The helper logs every invocation (best-effort, silent on failure) to:
 - Linux: `~/.cache/databricks-claude/credential-helper.log`
 
 Each entry records the resolved profile, CLI path, and either the token length on success or the underlying error. If Desktop reports `invalid_config` or 401, check this log first.
+
+## Rollout Guide
+
+End-to-end guide for deploying `databricks-claude` to a Claude Desktop fleet. This is the **single source of truth** for fleet rollout — the [Claude Desktop Integration](#claude-desktop-integration) and [serve Subcommand](#serve-subcommand) sections cross-link here rather than duplicating rollout steps.
+
+### Opinionated design: one workspace per fleet
+
+**`databricks-claude` assumes one Databricks workspace per fleet, dedicated to Claude capacity** — a single profile shared across every end-user in your organization. This is the architectural opinion, not just a docs framing:
+
+- One workspace = one Databricks profile name = one MDM artifact baked with that profile name = one auth command every end-user runs.
+- The wrapper's profile-resolution chain (`flag → state → MDM tier → DEFAULT`) exists so end-users never think about profiles; the MDM tier carries the fleet's canonical answer.
+- Multi-tenant / per-user workspace selection is **out of scope by design**. If your org has multiple Claude-capacity workspaces (one per business unit, etc.), each needs its own MDM artifact pushed to a distinct subset of endpoints — treat each subset as an independent fleet.
+
+Why this opinion: it simplifies every code path (no per-user profile guessing), every deploy decision (one artifact per fleet), and every doc (no decision tree about profiles). It matches how organizations actually allocate Databricks workspaces.
+
+**This guide is written for one admin deploying to N endpoints, all sharing one Databricks workspace.** Adapt accordingly if your org carves differently.
+
+### Which mode? (read this first)
+
+- **Helper-mode (default)** — pick this unless you specifically need OTLP telemetry from Claude Desktop. Desktop talks to the Databricks AI Gateway directly; the `databricks-claude` credential helper refreshes OAuth tokens on a TTL. Simplest deployment, fewest moving parts on endpoints, no daemon.
+- **Daemon-mode (`--daemon`)** — pick this if you need OTLP forwarding from Claude Desktop, or if your fleet's security policy forbids short-lived tokens leaving the endpoint per call. Desktop talks to a localhost `databricks-claude serve` daemon that owns OAuth refresh. Higher deployment complexity — requires `serve install` on every endpoint.
+- **Helper-mode + OTLP from Desktop is not currently supported.** Anthropic ships no `otlpCredentialHelper`, and OTLP requires dynamic auth that only the daemon provides. If upstream changes this, a third option will be added here.
+
+### Signing prerequisite
+
+**Upstream `databricks-claude` ships unsigned.** Signing is the deployer's responsibility — see [issue #54](https://github.com/IceRhymers/databricks-claude/issues/54) for the rationale (notarization and EV-cert infrastructure is cost-prohibitive for a no-revenue OSS project; it is an adopter concern, not an upstream deliverable). For fleet rollout you have three options:
+
+1. **Build and sign yourself (recommended for real fleets).** Fork the repo (or clone and tag a version), build with `make`, sign with your org's Developer ID (macOS) and/or EV cert (Windows), and notarize via `make notarize` — a stub target documented for adopters (see below). Push the signed artifacts via your MDM. For the self-signed `.pkg` + trust-profile route, see [MDM deployment with signed `.pkg`](#mdm-deployment-with-signed-pkg-self-signed).
+2. **Distribute via package manager.** `brew install IceRhymers/tap/databricks-claude` (macOS) and `scoop install databricks-claude` (Windows) strip the quarantine attribute automatically. Good for self-service installs; does not cover MDM-pushed deployments.
+3. **Click-through Gatekeeper / SmartScreen per endpoint.** Only viable at very small N (< 5) or for dev/test installs. For macOS, document `xattr -dr com.apple.quarantine /path/to/databricks-claude` for your users.
+
+**For real fleet rollouts (option 1), this guide assumes you have handled signing before pushing artifacts.** The rollout flow itself is identical regardless of who signed.
+
+The repo ships a `make notarize` stub for adopters who build and sign their own releases. It documents the expected contract (`DEVELOPER_ID_APPLICATION`, an `xcrun notarytool` keychain profile, the codesign → notarize → staple sequence) and exits with guidance when unconfigured. Implementing it end-to-end is an adopter responsibility — upstream ships the surface to fork-and-fill.
+
+### Helper-mode rollout (default)
+
+1. **Build, sign, and install the binary.** See [Signing prerequisite](#signing-prerequisite). The binary and its `databricks-claude-credential-helper` alias must land at a predictable path on every endpoint (e.g. `/usr/local/bin`).
+2. **Generate MDM artifacts** on the admin's machine:
+   ```bash
+   databricks-claude desktop generate-config --profile <fleet-profile>
+   ```
+   Produces `databricks-claude-desktop.{mobileconfig,reg,json}` in the current directory. The profile name baked in becomes the canonical fleet answer for every endpoint. For fleet path-pinning add `--binary-path` and `--databricks-cli-path` (see [MDM / fleet rollout](#mdm--fleet-rollout)), or `--for-pkg` if you deploy via the signed `.pkg`.
+3. **Sign the artifacts if your MDM requires it.** Some MDM systems sign their own payloads — check your vendor's docs.
+4. **Push via MDM.** Distribute the `.mobileconfig` to macOS endpoints (Jamf / Kandji / Intune / Workspace ONE) and import the `.reg` on Windows endpoints (Group Policy or your MDM's registry-push mechanism).
+5. **First launch on each endpoint.** The end-user runs the one-time auth command:
+   ```bash
+   databricks auth login --host <workspace-url> --profile <fleet-profile>
+   databricks-claude setup --profile <fleet-profile>
+   ```
+   With one profile per fleet this is a single command everyone runs once — trivially scriptable as an MDM login-triggered init script if you want it automated. `setup` is idempotent (no-op when already authed), so it is safe to run repeatedly.
+6. **Verify.** On the endpoint:
+   ```bash
+   databricks-claude setup --profile <fleet-profile>   # reports "Already authenticated"
+   ```
+   Then restart Claude Desktop — its third-party-inference path now runs against your Databricks AI Gateway, with tokens refreshed automatically by the credential helper.
+
+### Daemon-mode rollout
+
+Steps 1–3 are the same as helper-mode (build, sign, and install the binary).
+
+4. **Generate artifacts in daemon-mode** on the admin's machine:
+   ```bash
+   databricks-claude desktop generate-config --daemon \
+     --profile <fleet-profile> \
+     --port 49153 \
+     --daemon-fake-key <fleet-key>
+   ```
+   Add `--otel` to also emit OTLP keys so Claude Desktop forwards telemetry through the daemon. Daemon-mode artifacts omit the credential helper, set `gatewayBaseUrl` to `http://127.0.0.1:<port>` with a static localhost-gate key, and (with `--otel`) set `otlpEndpoint` to `http://127.0.0.1:<port>/otel` — the `/otel` path prefix is required so Desktop's exporter lands on the daemon's telemetry route, not its inference catch-all.
+5. **Install the daemon on each endpoint.** Three paths, in order of preference:
+   - **Per-user (self-service):** the end-user runs `databricks-claude serve install` once after the binary is installed. This registers a per-user OS service (LaunchAgent / systemd user unit / Scheduled Task) — see [Installing as a background service](#installing-as-a-background-service).
+   - **MDM init script:** push a login-triggered script that runs `databricks-claude serve install --skip-auth-check` from each user's context. `--skip-auth-check` is required because MDM scripts run without a tty and the install-time auth probe cannot prompt. Consult your MDM vendor's docs for per-user login-script delivery.
+   - **System-wide (cross-user)** install is explicitly out of scope for `serve install` — deploy a LaunchDaemon (macOS) or systemd system unit (Linux) manually if you need it.
+6. **Push MDM artifacts** (same as helper-mode step 4).
+7. **First launch on each endpoint.** The end-user runs the one-time auth command:
+   ```bash
+   databricks auth login --host <workspace-url> --profile <fleet-profile>
+   ```
+   Auto-bootstrap on first daemon start was considered and rejected — see [issue #166](https://github.com/IceRhymers/databricks-claude/issues/166). With one profile per fleet, a single manual auth command is trivial enough not to warrant the daemon-side complexity.
+8. **Verify.** On the endpoint:
+   ```bash
+   databricks-claude serve status
+   ```
+   Confirm it reports the daemon as registered, running, and healthy (`Registered=yes`, `Running=yes`, `Healthy=yes`). Then restart Claude Desktop — its inference path now runs through the localhost daemon, which owns OAuth refresh.
+
+### Cross-cutting concerns
+
+#### Profile resolution chain
+
+Every endpoint resolves the Databricks profile via `flag → saved state → MDM tier → DEFAULT`:
+
+- **flag** — an explicit `--profile` on a command invocation.
+- **saved state** — `~/.claude/.databricks-claude.json`, written by `setup` / `generate-config` / a wrapper run on that machine.
+- **MDM tier** — the `databricksProfile` key in the `com.icerhymers.databricks-claude` domain (macOS managed-preferences plist; Windows registry under `HKCU\SOFTWARE\IceRhymers\databricks-claude`), read by `pkg/mdmprofile`. This is what the generated artifact carries.
+- **DEFAULT** — the fallback sentinel.
+
+With one profile per fleet, the MDM tier is always the canonical answer — end-users never specify a profile.
+
+#### Token refresh expectations
+
+Databricks OAuth refresh tokens are short-lived — roughly **24 hours**, not 90 days. Every end-user re-authenticates roughly daily, so token-expiry recovery is the common case, not an edge case:
+
+- **Helper-mode** recovers transparently. When the access token expires, Claude Desktop's next credential-helper poll fails the fast-path, the helper runs `databricks auth login` (its subprocess stdout routed to stderr so it does not corrupt the token stream Desktop reads), a browser SSO window opens, and the helper retries — emitting a fresh token. To avoid a browser-at-first-launch surprise, run `databricks-claude setup --profile <fleet-profile>` before the user opens Desktop (this is what the first-launch step does).
+- **Daemon-mode** recovers via the daemon's normal `tp.Token()` refresh path. The daemon owns OAuth refresh and runs it on its standard code path — validated to work headless under LaunchAgent / systemd with no controlling tty.
+
+In both modes the end-user only sees an interruption if the *refresh* token itself expires — then they re-run `databricks auth login --host <workspace-url> --profile <fleet-profile>`.
+
+#### Gatekeeper / Defender SmartScreen
+
+Covered in [Signing prerequisite](#signing-prerequisite). Per-OS specifics: macOS quarantine is cleared with `xattr -dr com.apple.quarantine <path>` or by signing + notarizing the binary; Windows SmartScreen is satisfied by an EV-signed binary or a click-through "Run anyway" at small N. `serve install` prints a one-line warning on an unsigned or quarantined macOS binary but does not block the install.
+
+#### Verification per endpoint
+
+A single command an admin can run to check endpoint health:
+
+```bash
+# Helper-mode:
+databricks-claude setup --profile <fleet-profile> && databricks-claude --print-env
+
+# Daemon-mode (additionally):
+databricks-claude serve status
+```
+
+#### Mode switching
+
+To switch a fleet between modes, the admin generates new MDM artifacts (helper-mode or daemon-mode), pushes them, and end-users pick up the new config on the next Desktop restart:
+
+- **Helper-mode → daemon-mode:** push daemon-mode artifacts and install the daemon on each endpoint. A daemon left installed from a prior rollout is harmless and will pick up requests.
+- **Daemon-mode → helper-mode:** push helper-mode artifacts, then run `databricks-claude serve uninstall` on each endpoint (via an MDM script) to remove the now-unused daemon.
 
 ## CLI Usage
 
@@ -468,6 +560,8 @@ databricks-claude serve \
 **Port collision:** If port `49153` is unavailable at startup, `serve` prints the error and exits (unlike the CLI wrapper, which falls back to `:0`). The MDM-baked `gatewayBaseUrl` is a fixed URL that cannot follow a dynamic fallback. Stop the existing instance before restarting.
 
 ### Installing as a background service
+
+> For a full fleet rollout — generating MDM artifacts, signing, per-endpoint install, and verification — see the **[Rollout Guide](#rollout-guide)**. This section covers the `serve install` command itself.
 
 Register the daemon as a per-user OS service so it starts automatically at login:
 

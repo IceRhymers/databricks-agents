@@ -159,4 +159,32 @@ clean:
 lint:
 	go vet ./...
 
-.PHONY: build install test dist clean lint pkg trust-profile generate-signing-cert
+## STUB for adopters: notarize a self-built macOS binary for fleet rollout.
+## Upstream databricks-claude ships UNSIGNED — signing/notarization is the
+## deployer's responsibility (see issue #54 and the README "Signing
+## prerequisite" section). This target documents the contract so adopters who
+## fork the repo can fill it in for their org. It is intentionally NOT wired
+## end-to-end upstream.
+##
+## Expected env when implemented:
+##   DEVELOPER_ID_APPLICATION  -- e.g. "Developer ID Application: Your Org (TEAMID)"
+##   NOTARYTOOL_PROFILE        -- an `xcrun notarytool store-credentials` keychain profile
+##
+## Expected sequence (codesign -> notarize -> staple):
+##   codesign --force --options runtime --timestamp \
+##     --sign "$$DEVELOPER_ID_APPLICATION" build/databricks-claude
+##   ditto -c -k --keepParent build/databricks-claude build/databricks-claude.zip
+##   xcrun notarytool submit build/databricks-claude.zip \
+##     --keychain-profile "$$NOTARYTOOL_PROFILE" --wait
+##   xcrun stapler staple build/databricks-claude   # (or staple the .pkg / .dmg)
+notarize:
+	@echo "make notarize: STUB — upstream databricks-claude ships unsigned."
+	@echo "  Signing/notarization is an adopter responsibility (see issue #54"
+	@echo "  and the README 'Signing prerequisite' section)."
+	@echo ""
+	@echo "  To implement for your org: fork the repo, set DEVELOPER_ID_APPLICATION"
+	@echo "  and NOTARYTOOL_PROFILE, and fill in the codesign -> notarytool -> stapler"
+	@echo "  sequence documented in the Makefile recipe comment above this target."
+	@exit 1
+
+.PHONY: build install test dist clean lint pkg trust-profile generate-signing-cert notarize
