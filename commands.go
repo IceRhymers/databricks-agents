@@ -82,10 +82,6 @@ var rootCommand = cmd.Command{
 		{Name: "headless", Description: "Start proxy without launching claude (for IDE extensions or hooks)"},
 		{Name: "idle-timeout", Description: "Idle timeout for headless mode (default: 30m; 0 disables; use e.g. 30s, 5m, 1h)", TakesArg: true,
 			Default: "30m"},
-		{Name: "install-hooks", Description: "Install SessionStart/Stop hooks into ~/.claude/settings.json"},
-		{Name: "uninstall-hooks", Description: "Remove databricks-claude hooks from ~/.claude/settings.json"},
-		{Name: "headless-ensure", Description: "Start proxy if not running — called by the SessionStart hook"},
-		{Name: "headless-release", Description: "Decrement proxy refcount — called by the Stop hook"},
 		{Name: "no-update-check", Description: "Skip the automatic update check on startup",
 			EnvVar: "DATABRICKS_NO_UPDATE_CHECK"},
 		// NOTE: --daemon and --daemon-fake-key are *desktop generate-config*
@@ -119,6 +115,7 @@ var rootCommand = cmd.Command{
 		desktopCommand,
 		setupCommand,
 		configCommand,
+		hooksCommand,
 		serveCommand,
 	},
 }
@@ -246,13 +243,7 @@ Databricks-Claude Flags:
   --tls-key string             Path to TLS private key file (requires --tls-cert)
   --port int                   Fixed proxy port (default: 49153, saved to state)
   --headless                   Start proxy without launching claude (for IDE extensions)
-  --headless-ensure            Start proxy if not running (called by SessionStart hook)
-  --headless-release           Decrement proxy refcount (called by Stop hook)
   --idle-timeout duration      Idle timeout for headless mode (default 30m, 0 disables; use e.g. 30s, 5m, 1h)
-  --install-hooks              Install SessionStart/SessionEnd hooks AND perform first-run
-                               env setup (idempotent). Accepts --profile and --port to
-                               persist them; no prior databricks-claude invocation needed.
-  --uninstall-hooks            Remove databricks-claude hooks from ~/.claude/settings.json
   --no-update-check            Skip the automatic update check on startup
   --version                    Print version and exit
   --help, -h                   Show this help message
@@ -274,6 +265,16 @@ Subcommands:
                                  config write                    Bootstrap settings.json
                                  config show                     Print resolved config
                                Run 'databricks-claude config --help' for details.
+  hooks <subcommand>           Session-hook deployment mode. install/uninstall manage
+                               the SessionStart/SessionEnd entries in
+                               ~/.claude/settings.json; session-start/session-end are
+                               hook-invoked refcount-managed proxy lifecycle internals
+                               (consolidated off the root flag namespace in #173).
+                                 hooks install                   Install hooks + bootstrap
+                                 hooks uninstall                 Remove hooks
+                                 hooks session-start             (hook-invoked internal)
+                                 hooks session-end               (hook-invoked internal)
+                               Run 'databricks-claude hooks --help' for details.
   serve [install|uninstall|status|flags]
                                Long-lived daemon serving Claude Code and Claude
                                Desktop with persistent Databricks OAuth. Owns
@@ -942,4 +943,175 @@ Example output:
     ANTHROPIC_AUTH_TOKEN: dapi-***
     Upstream binary:      /usr/local/bin/claude
     OTEL enabled:         false
+`
+
+// hooksCommand declares the `hooks` subcommand tree introduced in #173.
+// Consolidates the 4 hooks-lifecycle root flags (--install-hooks,
+// --uninstall-hooks, --headless-ensure, --headless-release) under a
+// discoverable subcommand. install/uninstall manage the
+// SessionStart/SessionEnd entries in ~/.claude/settings.json;
+// session-start/session-end are hook-invoked refcount-managed proxy
+// lifecycle internals (formerly --headless-ensure / --headless-release).
+//
+// Tree shape:
+//
+//	hooks
+//	├── install        [--profile P] [--port N]
+//	├── uninstall
+//	├── session-start  [--port N]   (hook-invoked internal)
+//	└── session-end    [--port N]   (hook-invoked internal)
+//
+// The hook-install logic (installHooks/uninstallHooks in hooks.go), the
+// first-run bootstrap (bootstrapSettings), and the refcount-managed
+// proxy lifecycle (headlessEnsure/headlessRelease) are unchanged
+// behaviorally — they move behind tree commands and the generated hook
+// JSON is rewritten to invoke the new command names. No back-compat for
+// already-installed hooks (none deployed); a clean prefix swap on the
+// detector keeps idempotent re-install + uninstall correct.
+var hooksCommand = cmd.Command{
+	Name:  "hooks",
+	Short: "Session-hook deployment mode: install/uninstall + lifecycle internals",
+	Long:  hooksHelpTemplate,
+	Subcommands: []cmd.Command{
+		{
+			Name:  "install",
+			Short: "Install SessionStart/SessionEnd hooks + first-run env bootstrap",
+			Long:  hooksInstallHelpTemplate,
+			Flags: []cmd.FlagDef{
+				{Name: "profile", Description: "Databricks CLI profile to persist (default: DEFAULT)", TakesArg: true, Completer: "__databricks_profiles", StateKey: "profile", MDMKey: "databricksProfile", Default: "DEFAULT"},
+				{Name: "port", Description: "Proxy listen port to persist (default: 49153)", TakesArg: true, StateKey: "port", Default: "49153"},
+				{Name: "help", Short: "h", Description: "Show help message"},
+			},
+		},
+		{
+			Name:  "uninstall",
+			Short: "Remove databricks-claude hooks from ~/.claude/settings.json",
+			Long:  hooksUninstallHelpTemplate,
+			Flags: []cmd.FlagDef{
+				{Name: "help", Short: "h", Description: "Show help message"},
+			},
+		},
+		{
+			Name:  "session-start",
+			Short: "Start proxy if not running (invoked by the SessionStart hook — internal)",
+			Long:  hooksSessionStartHelpTemplate,
+			Flags: []cmd.FlagDef{
+				{Name: "port", Description: "Proxy listen port (default: saved state > 49153)", TakesArg: true, StateKey: "port", Default: "49153"},
+				{Name: "help", Short: "h", Description: "Show help message"},
+			},
+		},
+		{
+			Name:  "session-end",
+			Short: "Decrement proxy refcount (invoked by the SessionEnd hook — internal)",
+			Long:  hooksSessionEndHelpTemplate,
+			Flags: []cmd.FlagDef{
+				{Name: "port", Description: "Proxy listen port (default: saved state > 49153)", TakesArg: true, StateKey: "port", Default: "49153"},
+				{Name: "help", Short: "h", Description: "Show help message"},
+			},
+		},
+	},
+}
+
+const hooksHelpTemplate = `Usage: databricks-claude hooks <subcommand> [flags]
+
+Session-hook deployment mode for Claude Code. Installs hook entries into
+~/.claude/settings.json that spin a refcount-managed proxy up on
+SessionStart and tear it down on SessionEnd — making 'databricks-claude'
+auto-launch with every claude session without a long-lived daemon.
+
+Subcommands:
+  install        Install SessionStart/SessionEnd hooks AND perform
+                 first-run env bootstrap (idempotent). Accepts --profile
+                 and --port to persist them; no prior databricks-claude
+                 invocation needed.
+  uninstall      Remove databricks-claude hooks from
+                 ~/.claude/settings.json. Tolerates "not installed".
+  session-start  Hook-invoked internal: starts the proxy if it isn't
+                 already running, increments the per-port refcount.
+                 Called by the SessionStart hook JSON written by
+                 'hooks install'. Not intended to be invoked directly.
+  session-end    Hook-invoked internal: decrements the per-port refcount.
+                 The proxy exits when the last session ends. Called by
+                 the SessionEnd hook JSON written by 'hooks install'.
+                 Not intended to be invoked directly.
+
+Run 'databricks-claude hooks <subcommand> --help' for per-subcommand flags.
+
+Examples:
+  # First-time install on a developer machine:
+  databricks-claude hooks install --profile databricks-ai-inference
+
+  # Remove hooks (e.g. when switching to the long-lived 'serve' daemon):
+  databricks-claude hooks uninstall
+
+Exit codes:
+  0   success
+  1   write/discovery failure
+  2   missing or unknown subcommand
+`
+
+const hooksInstallHelpTemplate = `Usage: databricks-claude hooks install [flags]
+
+Install SessionStart and SessionEnd hooks into ~/.claude/settings.json
+and perform a first-run env bootstrap so users no longer need to invoke
+databricks-claude once before installing hooks. Idempotent — safe to
+re-run after upgrades.
+
+The bootstrap writes ANTHROPIC_BASE_URL=http://127.0.0.1:<port> as a
+placeholder; the SessionStart hook ('hooks session-start') overwrites
+it with the discovered AI Gateway URL on first run.
+
+Generated hook JSON:
+  SessionStart → "databricks-claude hooks session-start"
+  SessionEnd   → "databricks-claude hooks session-end"
+
+Flags:
+  --profile string   Databricks CLI profile to persist (default: DEFAULT)
+  --port int         Proxy listen port to persist (default: 49153)
+  --help, -h         Show this help message
+
+Examples:
+  # First-time install on a developer machine:
+  databricks-claude hooks install --profile databricks-ai-inference
+
+  # Re-install after upgrade (idempotent):
+  databricks-claude hooks install
+`
+
+const hooksUninstallHelpTemplate = `Usage: databricks-claude hooks uninstall
+
+Remove databricks-claude SessionStart/SessionEnd hook entries from
+~/.claude/settings.json. Tolerates "not installed" — safe to run when no
+hooks are present.
+
+Flags:
+  --help, -h   Show this help message
+`
+
+const hooksSessionStartHelpTemplate = `Usage: databricks-claude hooks session-start [flags]
+
+Hook-invoked internal: start the proxy if not already running and
+increment the per-port refcount. Called by the SessionStart hook JSON
+written by 'hooks install'. Not intended to be invoked directly by end
+users.
+
+Replaces the legacy --headless-ensure root flag.
+
+Flags:
+  --port int   Proxy listen port (default: saved state > 49153)
+  --help, -h   Show this help message
+`
+
+const hooksSessionEndHelpTemplate = `Usage: databricks-claude hooks session-end [flags]
+
+Hook-invoked internal: POST /shutdown to the proxy to decrement the
+per-port refcount. The proxy exits when the last session ends. Called
+by the SessionEnd hook JSON written by 'hooks install'. Not intended to
+be invoked directly by end users.
+
+Replaces the legacy --headless-release root flag.
+
+Flags:
+  --port int   Proxy listen port (default: saved state > 49153)
+  --help, -h   Show this help message
 `

@@ -40,25 +40,25 @@ var Version = "dev"
 // OTELMetricsTable*, OTELLogsTable*, OTELTraces, OTELTracesTable*, NoOTEL*,
 // WriteClaudeConfig, WithWebSearch*, WebSearchBackend*, WebSearchFetchBudget*).
 // Their mutation paths now live under the `config` subcommand tree.
+//
+// #173 removed the 4 hooks-lifecycle fields (InstallHooks, UninstallHooks,
+// HeadlessEnsure, HeadlessRelease). Their entrypoints now live under the
+// `hooks` subcommand tree (install / uninstall / session-start / session-end).
 type Args struct {
-	Profile         string
-	Verbose         bool
-	Version         bool
-	ShowHelp        bool
-	Upstream        string
-	LogFile         string
-	ProxyAPIKey     string
-	TLSCert         string
-	TLSKey          string
-	Port            int
-	Headless        bool
-	IdleTimeout     time.Duration
-	InstallHooks    bool
-	UninstallHooks  bool
-	HeadlessEnsure  bool
-	HeadlessRelease bool
-	NoUpdateCheck   bool
-	ClaudeArgs      []string
+	Profile       string
+	Verbose       bool
+	Version       bool
+	ShowHelp      bool
+	Upstream      string
+	LogFile       string
+	ProxyAPIKey   string
+	TLSCert       string
+	TLSKey        string
+	Port          int
+	Headless      bool
+	IdleTimeout   time.Duration
+	NoUpdateCheck bool
+	ClaudeArgs    []string
 }
 
 func main() {
@@ -149,6 +149,16 @@ func main() {
 		return
 	}
 
+	// `hooks` subcommand — session-hook deployment mode. install/uninstall
+	// manage the SessionStart/SessionEnd entries in ~/.claude/settings.json;
+	// session-start/session-end are the hook-invoked refcount-managed proxy
+	// lifecycle internals (formerly --headless-ensure / --headless-release
+	// before #173 consolidated them off the root flag namespace).
+	if len(os.Args) >= 2 && os.Args[1] == "hooks" {
+		runHooksCommand(os.Args[2:])
+		return
+	}
+
 	// Parse databricks-claude flags, passing everything else through to claude.
 	// Usage: databricks-claude [databricks-claude-flags] [--] [claude-args...]
 	// Unknown flags are forwarded to claude automatically.
@@ -168,53 +178,6 @@ func main() {
 
 	if a.Version {
 		fmt.Printf("databricks-claude %s\n", Version)
-		os.Exit(0)
-	}
-
-	// --- Hook lifecycle commands (handled before auth/config setup) ---
-	if a.InstallHooks || a.UninstallHooks {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			log.Fatalf("databricks-claude: cannot determine home dir: %v", err)
-		}
-		sp := filepath.Join(homeDir, ".claude", "settings.json")
-		if a.InstallHooks {
-			// First-run env setup: persist profile/port and write
-			// ANTHROPIC_BASE_URL placeholder so users no longer need to run
-			// `databricks-claude` once before installing hooks. The placeholder
-			// URL is overwritten by --headless-ensure at session start with
-			// the discovered gateway URL.
-			resolvedProfile := a.Profile
-			if resolvedProfile == "" {
-				resolvedProfile = "DEFAULT"
-			}
-			port := resolvePort(a.Port, loadState())
-			placeholder := fmt.Sprintf("http://127.0.0.1:%d", port)
-			if err := bootstrapSettings(a.Port, resolvedProfile, placeholder, nil); err != nil {
-				log.Fatalf("databricks-claude: --install-hooks bootstrap: %v", err)
-			}
-			if err := installHooks(sp); err != nil {
-				log.Fatalf("databricks-claude: --install-hooks: %v", err)
-			}
-			fmt.Fprintln(os.Stderr, "databricks-claude: hooks installed — SessionStart and SessionEnd hooks added to ~/.claude/settings.json")
-		} else {
-			if err := uninstallHooks(sp); err != nil {
-				log.Fatalf("databricks-claude: --uninstall-hooks: %v", err)
-			}
-			fmt.Fprintln(os.Stderr, "databricks-claude: hooks removed from ~/.claude/settings.json")
-		}
-		os.Exit(0)
-	}
-
-	// --- Headless hook commands (called by installed hooks, not by end users) ---
-	if a.HeadlessEnsure || a.HeadlessRelease {
-		state := loadState()
-		port := resolvePort(a.Port, state)
-		if a.HeadlessEnsure {
-			headlessEnsure(port)
-		} else {
-			headlessRelease(port)
-		}
 		os.Exit(0)
 	}
 
@@ -683,8 +646,7 @@ func envBlock(doc map[string]interface{}) map[string]interface{} {
 // parseArgs separates databricks-claude flags from claude flags.
 // databricks-claude owns: --profile, --port, --verbose/-v, --version, --help,
 // --upstream, --log-file, --proxy-api-key, --tls-cert, --tls-key, --headless,
-// --idle-timeout, --install-hooks, --uninstall-hooks, --headless-ensure,
-// --headless-release, --no-update-check.
+// --idle-timeout, --no-update-check.
 // Everything else (including unknown flags like --debug) passes through to claude.
 // An explicit "--" separator is supported but not required.
 //
@@ -693,6 +655,11 @@ func envBlock(doc map[string]interface{}) map[string]interface{} {
 // websearch enable|disable, config write, config show). Old flags are
 // removed, NOT aliased: `databricks-claude --otel` now passes `--otel`
 // through to claude as an unknown flag.
+//
+// #173 removed the 4 hooks-lifecycle flags (--install-hooks,
+// --uninstall-hooks, --headless-ensure, --headless-release) — they live
+// behind the `hooks` subcommand tree now (hooks install / uninstall /
+// session-start / session-end). Same "removed, not aliased" semantics.
 func parseArgs(args []string) (*Args, error) {
 	a := &Args{
 		IdleTimeout: 30 * time.Minute, // default
@@ -792,14 +759,6 @@ func parseArgs(args []string) (*Args, error) {
 					}
 				case "--headless":
 					a.Headless = true
-				case "--install-hooks":
-					a.InstallHooks = true
-				case "--uninstall-hooks":
-					a.UninstallHooks = true
-				case "--headless-ensure":
-					a.HeadlessEnsure = true
-				case "--headless-release":
-					a.HeadlessRelease = true
 				case "--no-update-check":
 					a.NoUpdateCheck = true
 				case "--idle-timeout":

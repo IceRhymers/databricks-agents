@@ -15,7 +15,7 @@ import (
 
 // headlessEnsure checks whether the proxy is healthy on the given port.
 // If not, it starts a detached headless proxy and polls until ready (max 10s).
-// Called by the SessionStart hook via: databricks-claude --headless-ensure
+// Called by the SessionStart hook via: databricks-claude hooks session-start
 func headlessEnsure(port int) {
 	if err := headless.Ensure(headless.Config{
 		Port:          port,
@@ -28,23 +28,23 @@ func headlessEnsure(port int) {
 }
 
 // headlessRelease calls POST /shutdown on the proxy to decrement the refcount.
-// Called by the Stop hook via: databricks-claude --headless-release
+// Called by the SessionEnd hook via: databricks-claude hooks session-end
 // Errors are logged but not fatal — proxy may already be stopped.
 func headlessRelease(port int) {
 	if os.Getenv("DATABRICKS_CLAUDE_MANAGED") == "1" {
-		log.Printf("databricks-claude: --headless-release: skipped (managed session)")
+		log.Printf("databricks-claude: hooks session-end: skipped (managed session)")
 		return
 	}
 
 	if mode, _ := health.ProxyMode(port, "http"); mode == "daemon" {
-		log.Printf("databricks-claude: --headless-release: managed by daemon, hook is no-op")
+		log.Printf("databricks-claude: hooks session-end: managed by daemon, hook is no-op")
 		return
 	}
 
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/shutdown", port), "application/json", nil)
 	if err != nil {
-		log.Printf("databricks-claude: --headless-release: %v (proxy may already be stopped)", err)
+		log.Printf("databricks-claude: hooks session-end: %v (proxy may already be stopped)", err)
 		return
 	}
 	resp.Body.Close()
@@ -74,7 +74,7 @@ func installHooks(settingsPath string) error {
 		"hooks": []interface{}{
 			map[string]interface{}{
 				"type":    "command",
-				"command": "databricks-claude --headless-ensure",
+				"command": "databricks-claude hooks session-start",
 				"timeout": 15,
 			},
 		},
@@ -90,7 +90,7 @@ func installHooks(settingsPath string) error {
 		"hooks": []interface{}{
 			map[string]interface{}{
 				"type":    "command",
-				"command": "databricks-claude --headless-release",
+				"command": "databricks-claude hooks session-end",
 				"timeout": 5,
 			},
 		},
@@ -130,7 +130,11 @@ func uninstallHooks(settingsPath string) error {
 	return writeSettingsJSON(settingsPath, doc)
 }
 
-// removeDBXHooks removes any hook entries whose command contains "databricks-claude --headless".
+// removeDBXHooks removes any hook entries whose command starts with
+// "databricks-claude hooks " (the new prefix introduced in #173). Detector
+// MUST stay aligned with the command names installHooks writes — drift here
+// silently orphans hooks (uninstall no-ops) and breaks idempotent re-install
+// (duplicates entries).
 func removeDBXHooks(hooks map[string]interface{}) {
 	for event, val := range hooks {
 		arr, _ := val.([]interface{})
@@ -144,7 +148,12 @@ func removeDBXHooks(hooks map[string]interface{}) {
 	}
 }
 
-// isDBXHookEntry returns true if any nested hook command references databricks-claude --headless.
+// isDBXHookEntry returns true if any nested hook command references
+// "databricks-claude hooks " — i.e. one of the session-start / session-end
+// commands written by installHooks. Prefix swap from the legacy
+// "databricks-claude --headless" landed in #173 alongside the JSON command
+// rewrite; the two MUST move together (see the round-trip test in
+// hooks_test.go for the bidirectional guard).
 func isDBXHookEntry(entry interface{}) bool {
 	m, ok := entry.(map[string]interface{})
 	if !ok {
@@ -154,7 +163,7 @@ func isDBXHookEntry(entry interface{}) bool {
 	for _, h := range inner {
 		hm, _ := h.(map[string]interface{})
 		if cmd, _ := hm["command"].(string); len(cmd) > 0 {
-			if strings.HasPrefix(cmd, "databricks-claude --headless") {
+			if strings.HasPrefix(cmd, "databricks-claude hooks ") {
 				return true
 			}
 		}

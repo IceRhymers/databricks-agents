@@ -47,7 +47,7 @@ There are three ways to use `databricks-claude`. Most people want **session hook
 
 | Primary client | Recommended setup |
 |----------------|-------------------|
-| CLI Claude Code, VS Code extension, JetBrains plugin | **Session hooks** — `databricks-claude --install-hooks --profile <name>`. |
+| CLI Claude Code, VS Code extension, JetBrains plugin | **Session hooks** — `databricks-claude hooks install --profile <name>`. |
 | Claude Desktop (chat UI and/or embedded Claude Code) | **Mobileconfig** — `databricks-claude desktop generate-config` + install in System Settings. |
 | Both | Install both. They coexist without conflict. |
 | One-off / scripted invocations | Use the [raw wrapper](#cli-usage) directly. |
@@ -102,18 +102,18 @@ Install hooks so every Claude Code session auto-starts the proxy on startup and 
 ### Install
 
 ```bash
-databricks-claude --install-hooks --profile <name>
+databricks-claude hooks install --profile <name>
 ```
 
 This is one-step setup: it persists your profile/port, writes `ANTHROPIC_BASE_URL` to `~/.claude/settings.json`, and registers the SessionStart and SessionEnd hooks. No prior `databricks-claude` invocation needed. Re-running is idempotent.
 
-- **SessionStart** — calls `databricks-claude --headless-ensure` on session startup: starts the proxy if it isn't already running.
-- **SessionEnd** — calls `databricks-claude --headless-release` on session end: decrements the refcount; proxy exits when the last session closes.
+- **SessionStart** — calls `databricks-claude hooks session-start` on session startup: starts the proxy if it isn't already running. (Hook-invoked internal — not intended to run by hand.)
+- **SessionEnd** — calls `databricks-claude hooks session-end` on session end: decrements the refcount; proxy exits when the last session closes. (Hook-invoked internal.)
 
 ### Uninstall
 
 ```bash
-databricks-claude --uninstall-hooks
+databricks-claude hooks uninstall
 ```
 
 Removes only the databricks-claude hook entries. Other hooks in your settings are untouched.
@@ -578,6 +578,31 @@ databricks-claude setup --profile databricks-ai-inference --force
 
 `setup` is the same auth flow the credential helper uses for daily token recovery — running it proactively in a fleet init script keeps users from seeing the recovery browser tab on their first Claude Desktop launch.
 
+## hooks Subcommand
+
+Session-hook deployment mode for Claude Code. Installs SessionStart/SessionEnd hook entries into `~/.claude/settings.json` that spin a refcount-managed proxy up on session start and tear it down on session end — so `claude` "just works" against your Databricks workspace without manually launching `databricks-claude` each time. See [Session Hooks (recommended)](#session-hooks-recommended) for the user-facing onboarding.
+
+```bash
+# First-time install:
+databricks-claude hooks install --profile <name>
+
+# Remove the hook entries (e.g. before switching to the long-lived `serve` daemon):
+databricks-claude hooks uninstall
+```
+
+`hooks install` is one-step setup: it persists `--profile` / `--port` to the state file, writes a placeholder `ANTHROPIC_BASE_URL` into `~/.claude/settings.json` (the SessionStart hook overwrites it with the discovered AI Gateway URL on first run), and registers the SessionStart and SessionEnd entries. Idempotent — re-running after upgrades is safe and produces no duplicates.
+
+`hooks uninstall` removes only the databricks-claude hook entries; other hooks in your settings are untouched. Tolerates "not installed" (no-op when no databricks-claude hooks are present).
+
+| Subcommand | Purpose |
+|------|---------|
+| `hooks install` | Install SessionStart/SessionEnd hooks AND perform first-run env bootstrap. Accepts `--profile P` / `--port N`. |
+| `hooks uninstall` | Remove databricks-claude hooks from `~/.claude/settings.json`. |
+| `hooks session-start` | **Hook-invoked internal.** Refcount-acquire + spawn the proxy if not already healthy. Called by the SessionStart hook JSON; not intended to be invoked directly. |
+| `hooks session-end` | **Hook-invoked internal.** POST `/shutdown` to decrement the refcount; proxy exits when the last session ends. Called by the SessionEnd hook JSON; not intended to be invoked directly. |
+
+The hooks deployment mode is unchanged behaviorally from earlier releases — the proxy still spins up on SessionStart and tears down on SessionEnd. Only the surface moved: prior to this release the same actions were `databricks-claude --install-hooks` / `--uninstall-hooks` / `--headless-ensure` / `--headless-release`. The old root flags have been **removed** (not aliased) and the generated hook JSON now invokes the new subcommand names. No back-compat for already-installed hooks; re-run `hooks install` to refresh the entries.
+
 ## serve Subcommand
 
 Long-lived daemon that serves **both Claude Code and Claude Desktop** with persistent Databricks OAuth. A third deployment mode alongside the per-session CLI wrapper (`databricks-claude claude …`) and SessionStart hooks — useful when you want a single OAuth-refreshing proxy that survives across sessions.
@@ -733,7 +758,7 @@ The write is idempotent — `ensureConfig` short-circuits when the env block alr
 - **Re-bootstrap when model names drift.** If you upgrade `databricks-claude` and the project ships new default model names, re-run `databricks-claude config write` once to refresh them. The bootstrap is idempotent and only writes keys that differ.
 - **OTEL tables persist to state.** Run `databricks-claude serve --otel-metrics-table foo --otel-logs-table bar` once; the daemon (or its installed service) picks them up from `~/.claude/.databricks-claude.json` on every restart thereafter.
 - **Don't run the CLI wrapper (`databricks-claude claude …`) at the same time as the daemon for the same workspace.** Pick one deployment mode per workspace; mixing both means two proxies fighting over the same port and settings block.
-- **Hooks coexist cleanly.** If you've also installed SessionStart hooks (`databricks-claude --install-hooks`), they probe the daemon's `/health` and no-op when it's running, falling back to per-session proxy only if the daemon is down.
+- **Hooks coexist cleanly.** If you've also installed SessionStart hooks (`databricks-claude hooks install`), they probe the daemon's `/health` and no-op when it's running, falling back to per-session proxy only if the daemon is down.
 
 To stop using the daemon, run `databricks-claude serve uninstall` and remove the `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` lines from `~/.claude/settings.json` (or delete the whole `env` block if you don't use Claude Code anymore).
 
