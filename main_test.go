@@ -32,7 +32,7 @@ func TestParseArgs_HelpLong(t *testing.T) {
 	if !a.ShowHelp {
 		t.Error("expected showHelp=true for --help")
 	}
-	if a.Profile != "" || a.Verbose || a.Version || a.PrintEnv || a.OTEL || a.Upstream != "" || a.LogFile != "" || a.NoOTEL || len(a.ClaudeArgs) != 0 {
+	if a.Profile != "" || a.Verbose || a.Version || a.Upstream != "" || a.LogFile != "" || len(a.ClaudeArgs) != 0 {
 		t.Error("unexpected non-default values alongside --help")
 	}
 }
@@ -57,10 +57,47 @@ func TestParseArgs_SeparatorForwardsHelp(t *testing.T) {
 	}
 }
 
-func TestParseArgs_PrintEnv(t *testing.T) {
-	a, _ := parseArgs([]string{"--print-env"})
-	if !a.PrintEnv {
-		t.Error("expected printEnv=true for --print-env")
+// TestParseArgs_RemovedFlagsPassThrough confirms #172's "removed, not
+// aliased" contract: legacy persistent-config flags now forward to claude
+// as unknown args, no Args fields are populated for them.
+func TestParseArgs_RemovedFlagsPassThrough(t *testing.T) {
+	removed := []string{
+		"--print-env",
+		"--otel",
+		"--otel-metrics-table", "x",
+		"--otel-logs-table", "y",
+		"--otel-traces",
+		"--otel-traces-table", "z",
+		"--no-otel",
+		"--no-otel-metrics",
+		"--no-otel-logs",
+		"--no-otel-traces",
+		"--write-claude-config",
+		"--with-websearch",
+		"--websearch-backend", "duckduckgo",
+		"--websearch-fetch-budget", "1024",
+	}
+	a, err := parseArgs(removed)
+	if err != nil {
+		t.Fatalf("parseArgs returned error for legacy flags (must pass through, not error): %v", err)
+	}
+	// Every removed flag should be in ClaudeArgs (passthrough).
+	for _, want := range []string{
+		"--print-env", "--otel", "--otel-metrics-table", "--otel-logs-table",
+		"--otel-traces", "--otel-traces-table", "--no-otel", "--no-otel-metrics",
+		"--no-otel-logs", "--no-otel-traces", "--write-claude-config",
+		"--with-websearch", "--websearch-backend", "--websearch-fetch-budget",
+	} {
+		found := false
+		for _, ca := range a.ClaudeArgs {
+			if ca == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected %q to forward to ClaudeArgs (removed in #172, not aliased), got ClaudeArgs=%v", want, a.ClaudeArgs)
+		}
 	}
 }
 
@@ -113,172 +150,10 @@ func TestParseArgs_Upstream(t *testing.T) {
 	}
 }
 
-func TestParseArgs_Otel(t *testing.T) {
-	a, _ := parseArgs([]string{"--otel"})
-	if !a.OTEL {
-		t.Error("expected otel=true for --otel")
-	}
-}
-
-func TestParseArgs_OtelMetricsTableOverride(t *testing.T) {
-	a, _ := parseArgs([]string{"--otel-metrics-table", "main.default.otel"})
-	if !a.OTELMetricsTableSet {
-		t.Error("expected metricsTableSet=true when --otel-metrics-table is passed")
-	}
-	if a.OTELMetricsTable != "main.default.otel" {
-		t.Errorf("expected metricsTable=%q, got %q", "main.default.otel", a.OTELMetricsTable)
-	}
-}
-
-func TestParseArgs_OtelMetricsTableDefault(t *testing.T) {
-	a, _ := parseArgs([]string{"--otel"})
-	if a.OTELMetricsTableSet {
-		t.Error("expected metricsTableSet=false when --otel-metrics-table is not passed")
-	}
-	if a.OTELMetricsTable != "main.claude_telemetry.claude_otel_metrics" {
-		t.Errorf("expected default metricsTable, got %q", a.OTELMetricsTable)
-	}
-}
-
-func TestParseArgs_OtelMetricsTableEquals(t *testing.T) {
-	a, _ := parseArgs([]string{"--otel-metrics-table=my.catalog.table"})
-	if !a.OTELMetricsTableSet {
-		t.Error("expected metricsTableSet=true for --otel-metrics-table=value")
-	}
-	if a.OTELMetricsTable != "my.catalog.table" {
-		t.Errorf("expected metricsTable=%q, got %q", "my.catalog.table", a.OTELMetricsTable)
-	}
-}
-
-func TestParseArgs_OtelLogsTableOverride(t *testing.T) {
-	a, _ := parseArgs([]string{"--otel-logs-table", "main.default.my_logs"})
-	if !a.OTELLogsTableSet {
-		t.Error("expected logsTableSet=true when --otel-logs-table is passed")
-	}
-	if a.OTELLogsTable != "main.default.my_logs" {
-		t.Errorf("expected logsTable=%q, got %q", "main.default.my_logs", a.OTELLogsTable)
-	}
-}
-
-func TestParseArgs_OtelLogsTableDefault(t *testing.T) {
-	a, _ := parseArgs([]string{"--otel"})
-	if a.OTELLogsTableSet {
-		t.Error("expected logsTableSet=false when --otel-logs-table is not passed")
-	}
-	if a.OTELLogsTable != "" {
-		t.Errorf("expected empty logsTable default, got %q", a.OTELLogsTable)
-	}
-}
-
-func TestParseArgs_OtelLogsTableEquals(t *testing.T) {
-	a, _ := parseArgs([]string{"--otel-logs-table=my.catalog.logs"})
-	if !a.OTELLogsTableSet {
-		t.Error("expected logsTableSet=true for --otel-logs-table=value")
-	}
-	if a.OTELLogsTable != "my.catalog.logs" {
-		t.Errorf("expected logsTable=%q, got %q", "my.catalog.logs", a.OTELLogsTable)
-	}
-}
-
-func TestParseArgs_BothOtelTables(t *testing.T) {
-	a, _ := parseArgs([]string{
-		"--otel-metrics-table", "cat.schema.metrics",
-		"--otel-logs-table", "cat.schema.logs",
-	})
-	if !a.OTELMetricsTableSet || !a.OTELLogsTableSet {
-		t.Error("expected both table flags to be set")
-	}
-	if a.OTELMetricsTable != "cat.schema.metrics" {
-		t.Errorf("metricsTable=%q, want cat.schema.metrics", a.OTELMetricsTable)
-	}
-	if a.OTELLogsTable != "cat.schema.logs" {
-		t.Errorf("logsTable=%q, want cat.schema.logs", a.OTELLogsTable)
-	}
-}
-
 func TestParseArgs_UnknownFlagPassthrough(t *testing.T) {
 	a, _ := parseArgs([]string{"--unknown"})
 	if len(a.ClaudeArgs) != 1 || a.ClaudeArgs[0] != "--unknown" {
 		t.Errorf("expected claudeArgs=[\"--unknown\"], got %v", a.ClaudeArgs)
-	}
-}
-
-func TestParseArgs_WithWebSearch(t *testing.T) {
-	a, err := parseArgs([]string{"--with-websearch"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !a.WithWebSearch {
-		t.Errorf("expected WithWebSearch=true")
-	}
-	if !a.WithWebSearchSet {
-		t.Errorf("expected WithWebSearchSet=true when --with-websearch is passed")
-	}
-}
-
-func TestParseArgs_WithWebSearchDefault(t *testing.T) {
-	a, _ := parseArgs([]string{})
-	if a.WithWebSearch {
-		t.Errorf("expected WithWebSearch=false by default")
-	}
-	if a.WithWebSearchSet {
-		t.Errorf("expected WithWebSearchSet=false when --with-websearch is not passed")
-	}
-}
-
-func TestParseArgs_WebSearchBackend(t *testing.T) {
-	a, err := parseArgs([]string{"--websearch-backend", "duckduckgo"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if a.WebSearchBackend != "duckduckgo" {
-		t.Errorf("expected WebSearchBackend=duckduckgo, got %q", a.WebSearchBackend)
-	}
-	if !a.WebSearchBackendSet {
-		t.Errorf("expected WebSearchBackendSet=true")
-	}
-}
-
-func TestParseArgs_WebSearchBackendEquals(t *testing.T) {
-	a, _ := parseArgs([]string{"--websearch-backend=none"})
-	if a.WebSearchBackend != "none" {
-		t.Errorf("expected WebSearchBackend=none, got %q", a.WebSearchBackend)
-	}
-	if !a.WebSearchBackendSet {
-		t.Errorf("expected WebSearchBackendSet=true")
-	}
-}
-
-func TestParseArgs_WebSearchFetchBudget(t *testing.T) {
-	a, err := parseArgs([]string{"--websearch-fetch-budget", "204800"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if a.WebSearchFetchBudget != 204800 {
-		t.Errorf("expected WebSearchFetchBudget=204800, got %d", a.WebSearchFetchBudget)
-	}
-	if !a.WebSearchFetchBudgetSet {
-		t.Errorf("expected WebSearchFetchBudgetSet=true")
-	}
-}
-
-func TestParseArgs_WebSearchFetchBudgetEquals(t *testing.T) {
-	a, _ := parseArgs([]string{"--websearch-fetch-budget=51200"})
-	if a.WebSearchFetchBudget != 51200 {
-		t.Errorf("expected WebSearchFetchBudget=51200, got %d", a.WebSearchFetchBudget)
-	}
-}
-
-func TestParseArgs_AllWebSearchFlagsTogether(t *testing.T) {
-	a, _ := parseArgs([]string{"--with-websearch", "--websearch-backend", "duckduckgo", "--websearch-fetch-budget", "65536"})
-	if !a.WithWebSearch {
-		t.Errorf("expected WithWebSearch=true")
-	}
-	if a.WebSearchBackend != "duckduckgo" {
-		t.Errorf("expected WebSearchBackend=duckduckgo, got %q", a.WebSearchBackend)
-	}
-	if a.WebSearchFetchBudget != 65536 {
-		t.Errorf("expected WebSearchFetchBudget=65536, got %d", a.WebSearchFetchBudget)
 	}
 }
 
@@ -287,7 +162,7 @@ func TestParseArgs_EmptyArgs(t *testing.T) {
 	if a.Profile != "" {
 		t.Errorf("expected empty profile, got %q", a.Profile)
 	}
-	if a.Verbose || a.Version || a.ShowHelp || a.PrintEnv || a.OTEL || a.NoOTEL {
+	if a.Verbose || a.Version || a.ShowHelp {
 		t.Error("expected all bool flags false for empty args")
 	}
 	if a.Upstream != "" {
@@ -298,10 +173,6 @@ func TestParseArgs_EmptyArgs(t *testing.T) {
 	}
 	if len(a.ClaudeArgs) != 0 {
 		t.Errorf("expected no claudeArgs, got %v", a.ClaudeArgs)
-	}
-	// OTELMetricsTable should have the default value
-	if a.OTELMetricsTable == "" {
-		t.Error("expected non-empty default otelMetricsTable")
 	}
 }
 
@@ -342,137 +213,6 @@ func TestParseArgs_HeadlessWithOtherFlags(t *testing.T) {
 	}
 }
 
-func TestParseArgs_NoOtel(t *testing.T) {
-	a, _ := parseArgs([]string{"--no-otel"})
-	if !a.NoOTEL {
-		t.Error("expected noOtel=true for --no-otel")
-	}
-	if a.OTEL {
-		t.Error("expected otel=false when only --no-otel given")
-	}
-	if len(a.ClaudeArgs) != 0 {
-		t.Errorf("expected no claudeArgs, got %v", a.ClaudeArgs)
-	}
-}
-
-func TestParseArgs_NoOtelAndOtel(t *testing.T) {
-	a, _ := parseArgs([]string{"--no-otel", "--otel"})
-	if !a.NoOTEL {
-		t.Error("expected noOtel=true")
-	}
-	if !a.OTEL {
-		t.Error("expected otel=true (both flags can coexist; main() handles precedence)")
-	}
-}
-
-func TestParseArgs_NoOtelWithPassthrough(t *testing.T) {
-	a, _ := parseArgs([]string{"--no-otel", "somearg"})
-	if !a.NoOTEL {
-		t.Error("expected noOtel=true")
-	}
-	if len(a.ClaudeArgs) != 1 || a.ClaudeArgs[0] != "somearg" {
-		t.Errorf("expected claudeArgs=[\"somearg\"], got %v", a.ClaudeArgs)
-	}
-}
-
-func TestParseArgs_OtelUnaffectedByNoOtel(t *testing.T) {
-	a, _ := parseArgs([]string{"--otel"})
-	if !a.OTEL {
-		t.Error("expected otel=true for --otel")
-	}
-	if a.NoOTEL {
-		t.Error("expected noOtel=false when only --otel given")
-	}
-}
-
-// --- per-signal no-otel-* flag tests ---
-
-func TestParseArgs_NoOtelMetrics(t *testing.T) {
-	a, _ := parseArgs([]string{"--no-otel-metrics"})
-	if !a.NoOTELMetrics {
-		t.Error("expected noOtelMetrics=true for --no-otel-metrics")
-	}
-	if a.NoOTELLogs || a.NoOTELTraces {
-		t.Error("expected noOtelLogs/noOtelTraces=false when only --no-otel-metrics given")
-	}
-}
-
-func TestParseArgs_NoOtelLogs(t *testing.T) {
-	a, _ := parseArgs([]string{"--no-otel-logs"})
-	if !a.NoOTELLogs {
-		t.Error("expected noOtelLogs=true for --no-otel-logs")
-	}
-	if a.NoOTELMetrics || a.NoOTELTraces {
-		t.Error("expected noOtelMetrics/noOtelTraces=false when only --no-otel-logs given")
-	}
-}
-
-func TestParseArgs_NoOtelTraces(t *testing.T) {
-	a, _ := parseArgs([]string{"--no-otel-traces"})
-	if !a.NoOTELTraces {
-		t.Error("expected noOtelTraces=true for --no-otel-traces")
-	}
-	if a.NoOTELMetrics || a.NoOTELLogs {
-		t.Error("expected noOtelMetrics/noOtelLogs=false when only --no-otel-traces given")
-	}
-}
-
-// --- --otel-traces flag tests ---
-
-func TestParseArgs_OtelTraces(t *testing.T) {
-	a, _ := parseArgs([]string{"--otel-traces"})
-	if !a.OTELTraces {
-		t.Error("expected otelTraces=true for --otel-traces")
-	}
-}
-
-func TestParseArgs_OtelTracesTableOverride(t *testing.T) {
-	a, _ := parseArgs([]string{"--otel-traces-table", "main.default.traces"})
-	if !a.OTELTracesTableSet {
-		t.Error("expected tracesTableSet=true when --otel-traces-table is passed")
-	}
-	if a.OTELTracesTable != "main.default.traces" {
-		t.Errorf("expected tracesTable=%q, got %q", "main.default.traces", a.OTELTracesTable)
-	}
-}
-
-func TestParseArgs_OtelTracesTableEquals(t *testing.T) {
-	a, _ := parseArgs([]string{"--otel-traces-table=my.catalog.traces"})
-	if !a.OTELTracesTableSet {
-		t.Error("expected tracesTableSet=true for --otel-traces-table=value")
-	}
-	if a.OTELTracesTable != "my.catalog.traces" {
-		t.Errorf("expected tracesTable=%q, got %q", "my.catalog.traces", a.OTELTracesTable)
-	}
-}
-
-func TestParseArgs_OtelTracesTableDefault(t *testing.T) {
-	// --otel-traces alone (no table) should not auto-populate a default table —
-	// traces only activate when an explicit --otel-traces-table is provided.
-	a, _ := parseArgs([]string{"--otel-traces"})
-	if !a.OTELTraces {
-		t.Error("expected otelTraces=true")
-	}
-	if a.OTELTracesTableSet {
-		t.Error("expected tracesTableSet=false without --otel-traces-table")
-	}
-	if a.OTELTracesTable != "" {
-		t.Errorf("expected empty tracesTable default, got %q", a.OTELTracesTable)
-	}
-}
-
-// TestParseArgs_TracesStandalone verifies that --otel-traces-table works
-// without --otel — traces is a standalone signal.
-func TestParseArgs_TracesStandalone(t *testing.T) {
-	a, _ := parseArgs([]string{"--otel-traces-table", "cat.schema.traces"})
-	if a.OTEL {
-		t.Error("expected otel=false when only --otel-traces-table given")
-	}
-	if !a.OTELTracesTableSet || a.OTELTracesTable != "cat.schema.traces" {
-		t.Errorf("expected tracesTable=cat.schema.traces (set), got %q (set=%v)", a.OTELTracesTable, a.OTELTracesTableSet)
-	}
-}
-
 // Table-driven comprehensive test for parseArgs.
 func TestParseArgs_Table(t *testing.T) {
 	type result struct {
@@ -480,8 +220,6 @@ func TestParseArgs_Table(t *testing.T) {
 		verbose   bool
 		version   bool
 		showHelp  bool
-		printEnv  bool
-		otel      bool
 		upstream  string
 		logFile   string
 		claudeLen int
@@ -501,11 +239,6 @@ func TestParseArgs_Table(t *testing.T) {
 			name: "-h sets showHelp",
 			args: []string{"-h"},
 			want: result{showHelp: true},
-		},
-		{
-			name: "--print-env sets printEnv",
-			args: []string{"--print-env"},
-			want: result{printEnv: true},
 		},
 		{
 			name: "--version sets version",
@@ -548,11 +281,6 @@ func TestParseArgs_Table(t *testing.T) {
 			want: result{upstream: "/path/to/claude"},
 		},
 		{
-			name: "--otel sets otel",
-			args: []string{"--otel"},
-			want: result{otel: true},
-		},
-		{
 			name: "unknown flag passes through",
 			args: []string{"--unknown"},
 			want: result{claudeLen: 1},
@@ -587,12 +315,6 @@ func TestParseArgs_Table(t *testing.T) {
 			}
 			if a.ShowHelp != tc.want.showHelp {
 				t.Errorf("showHelp: got %v, want %v", a.ShowHelp, tc.want.showHelp)
-			}
-			if a.PrintEnv != tc.want.printEnv {
-				t.Errorf("printEnv: got %v, want %v", a.PrintEnv, tc.want.printEnv)
-			}
-			if a.OTEL != tc.want.otel {
-				t.Errorf("otel: got %v, want %v", a.OTEL, tc.want.otel)
 			}
 			if a.Upstream != tc.want.upstream {
 				t.Errorf("upstream: got %q, want %q", a.Upstream, tc.want.upstream)
@@ -712,12 +434,21 @@ func TestHandleHelp_ContainsDatabricksClaude(t *testing.T) {
 	}
 }
 
-func TestHandleHelp_ContainsPrintEnvFlag(t *testing.T) {
+// TestHandleHelp_DoesNotContainRemovedFlags is the inverse: post-#172 the
+// 14 persistent-config flags MUST NOT appear in root help. Old flags moved
+// behind `config <subcommand>`.
+func TestHandleHelp_DoesNotContainRemovedFlags(t *testing.T) {
 	out := captureStdout(func() {
 		handleHelp()
 	})
-	if !strings.Contains(out, "--print-env") {
-		t.Errorf("expected help output to contain '--print-env', got:\n%s", out)
+	for _, flag := range []string{
+		"--print-env", "--otel", "--no-otel", "--no-otel-metrics", "--no-otel-logs", "--no-otel-traces",
+		"--otel-metrics-table", "--otel-logs-table", "--otel-traces", "--otel-traces-table",
+		"--write-claude-config", "--with-websearch", "--websearch-backend", "--websearch-fetch-budget",
+	} {
+		if strings.Contains(out, flag) {
+			t.Errorf("removed flag %q must not appear in root help (#172), got:\n%s", flag, out)
+		}
 	}
 }
 
@@ -725,11 +456,22 @@ func TestHandleHelp_AllFlagsPresent(t *testing.T) {
 	out := captureStdout(func() {
 		handleHelp()
 	})
-	flags := []string{"--profile", "--upstream", "--verbose", "-v", "--log-file", "--otel", "--otel-metrics-table", "--otel-logs-table", "--headless", "--idle-timeout", "--version", "--help"}
+	flags := []string{"--profile", "--upstream", "--verbose", "-v", "--log-file", "--headless", "--idle-timeout", "--version", "--help"}
 	for _, flag := range flags {
 		if !strings.Contains(out, flag) {
 			t.Errorf("expected help output to contain flag %q, got:\n%s", flag, out)
 		}
+	}
+}
+
+// TestHandleHelp_AdvertisesConfigSubcommand asserts the root help points
+// users at the `config` subcommand tree where the legacy flags moved.
+func TestHandleHelp_AdvertisesConfigSubcommand(t *testing.T) {
+	out := captureStdout(func() {
+		handleHelp()
+	})
+	if !strings.Contains(out, "config <subcommand>") {
+		t.Errorf("expected root help to advertise 'config <subcommand>', got:\n%s", out)
 	}
 }
 
@@ -1238,146 +980,18 @@ func TestIdleTimeout_ZeroDisables(t *testing.T) {
 	}
 }
 
-// --- --write-claude-config flag tests ---
+// --- `config write` (was --write-claude-config) integration tests ---
 
-func TestParseArgs_WriteClaudeConfig(t *testing.T) {
-	a, err := parseArgs([]string{"--write-claude-config"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !a.WriteClaudeConfig {
-		t.Error("expected WriteClaudeConfig=true for --write-claude-config")
-	}
-	// Must not set any other early-exit flags.
-	if a.ShowHelp || a.Version || a.PrintEnv || a.InstallHooks || a.Headless {
-		t.Error("unexpected non-default values alongside --write-claude-config")
-	}
-	if len(a.ClaudeArgs) != 0 {
-		t.Errorf("expected no claude passthrough args, got %v", a.ClaudeArgs)
-	}
-}
-
-func TestParseArgs_WriteClaudeConfig_WithProfile(t *testing.T) {
-	a, err := parseArgs([]string{"--write-claude-config", "--profile", "foo"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !a.WriteClaudeConfig {
-		t.Error("expected WriteClaudeConfig=true")
-	}
-	if a.Profile != "foo" {
-		t.Errorf("expected Profile=foo, got %q", a.Profile)
-	}
-}
-
-func TestParseArgs_WriteClaudeConfig_WithWebSearch(t *testing.T) {
-	a, err := parseArgs([]string{"--write-claude-config", "--with-websearch", "--websearch-backend", "duckduckgo", "--websearch-fetch-budget", "204800"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !a.WriteClaudeConfig {
-		t.Error("expected WriteClaudeConfig=true")
-	}
-	if !a.WithWebSearchSet || !a.WithWebSearch {
-		t.Errorf("expected WithWebSearch=true (Set=%v, Val=%v)", a.WithWebSearchSet, a.WithWebSearch)
-	}
-	if !a.WebSearchBackendSet || a.WebSearchBackend != "duckduckgo" {
-		t.Errorf("expected WebSearchBackend=duckduckgo (Set=%v, Val=%q)", a.WebSearchBackendSet, a.WebSearchBackend)
-	}
-	if !a.WebSearchFetchBudgetSet || a.WebSearchFetchBudget != 204800 {
-		t.Errorf("expected WebSearchFetchBudget=204800 (Set=%v, Val=%d)", a.WebSearchFetchBudgetSet, a.WebSearchFetchBudget)
-	}
-}
-
-// TestWriteClaudeConfig_PersistsWebSearchState verifies that the resolution
-// + persistence block for --with-websearch in the --write-claude-config
-// branch writes to ~/.claude/.databricks-claude.json so the daemon picks up
-// the websearch opt-in on its next start. Websearch is a proxy-side feature
-// controlled entirely by state — it does NOT add a key to settings.json env.
-// Drives the same block the live code path uses.
-func TestWriteClaudeConfig_PersistsWebSearchState(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-
-	origStatePath := statePath
-	statePath = func() string { return filepath.Join(tmpHome, ".claude", ".databricks-claude.json") }
-	defer func() { statePath = origStatePath }()
-
-	a := &Args{
-		WithWebSearch:           true,
-		WithWebSearchSet:        true,
-		WebSearchBackend:        "duckduckgo",
-		WebSearchBackendSet:     true,
-		WebSearchFetchBudget:    204800,
-		WebSearchFetchBudgetSet: true,
-	}
-
-	// Mirror the resolution+persistence shape inside the --write-claude-config
-	// branch. Any regression here that drops one of the three writes will be
-	// caught by the per-field assertions below.
-	wsState := loadState()
-	withWebSearch := wsState.WithWebSearch
-	wsBackend := wsState.WebSearchBackend
-	wsBudget := wsState.WebSearchFetchBudget
-	if a.WithWebSearchSet {
-		withWebSearch = a.WithWebSearch
-	}
-	if a.WebSearchBackendSet {
-		wsBackend = a.WebSearchBackend
-	}
-	if a.WebSearchFetchBudgetSet {
-		wsBudget = a.WebSearchFetchBudget
-	}
-	mutated := false
-	if a.WithWebSearchSet && wsState.WithWebSearch != withWebSearch {
-		wsState.WithWebSearch = withWebSearch
-		mutated = true
-	}
-	if a.WebSearchBackendSet && wsState.WebSearchBackend != wsBackend {
-		wsState.WebSearchBackend = wsBackend
-		mutated = true
-	}
-	if a.WebSearchFetchBudgetSet && wsState.WebSearchFetchBudget != wsBudget {
-		wsState.WebSearchFetchBudget = wsBudget
-		mutated = true
-	}
-	if mutated {
-		if err := saveState(wsState); err != nil {
-			t.Fatalf("saveState failed: %v", err)
-		}
-	}
-
-	got := loadState()
-	if !got.WithWebSearch {
-		t.Error("expected state.WithWebSearch=true after persist")
-	}
-	if got.WebSearchBackend != "duckduckgo" {
-		t.Errorf("state.WebSearchBackend: got %q, want %q", got.WebSearchBackend, "duckduckgo")
-	}
-	if got.WebSearchFetchBudget != 204800 {
-		t.Errorf("state.WebSearchFetchBudget: got %d, want 204800", got.WebSearchFetchBudget)
-	}
-}
-
-func TestHandleHelp_AdvertisesWriteClaudeConfig(t *testing.T) {
-	out := captureStdout(func() {
-		handleHelp()
-	})
-	if !strings.Contains(out, "--write-claude-config") {
-		t.Errorf("expected help output to contain '--write-claude-config', got:\n%s", out)
-	}
-}
-
-// TestWriteClaudeConfig_BootstrapWritesFullEnvBlock verifies that the
-// bootstrapSettings + ensureConfig write path used by --write-claude-config
+// TestConfigWrite_BootstrapWritesFullEnvBlock verifies that the
+// bootstrapSettings + ensureConfig write path used by `config write`
 // produces the full needsFullSetup key set without requiring the Databricks CLI.
 //
 // Drives against databricksFullSetupEnv() — the single source of truth used
-// by BOTH the --write-claude-config branch and the normal-startup
-// needsFullSetup block. A regression that deletes any model key, the custom
-// header, or the experimental-betas line from the helper fails this test
-// regardless of which call site is exercised.
-func TestWriteClaudeConfig_BootstrapWritesFullEnvBlock(t *testing.T) {
+// by BOTH the `config write` runner and the normal-startup needsFullSetup
+// block. A regression that deletes any model key, the custom header, or the
+// experimental-betas line from the helper fails this test regardless of
+// which call site is exercised.
+func TestConfigWrite_BootstrapWritesFullEnvBlock(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
@@ -1464,9 +1078,9 @@ func TestDatabricksFullSetupEnv_KeyCoverage(t *testing.T) {
 	}
 }
 
-// TestWriteClaudeConfig_MissingModelKeys confirms that omitting the needsFullSetup
+// TestConfigWrite_MissingModelKeys confirms that omitting the needsFullSetup
 // keys from otelEnv (passing nil) means model keys are absent — the negative control.
-func TestWriteClaudeConfig_MissingModelKeys(t *testing.T) {
+func TestConfigWrite_MissingModelKeys(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
@@ -1532,15 +1146,14 @@ func TestKnownFlagsCoverAllFlagDefs(t *testing.T) {
 //
 // We feed parseArgs a single `--<name>` token (with a type-appropriate
 // value for TakesArg flags so parsers that validate their input — e.g.
-// --idle-timeout, --websearch-fetch-budget — don't reject the synthetic
-// case). For non-TakesArg flags the token is sufficient on its own.
+// --idle-timeout — don't reject the synthetic case). For non-TakesArg
+// flags the token is sufficient on its own.
 func TestRootTreeFlagsAreParseRecognised(t *testing.T) {
 	// Type-appropriate synthetic values for flags whose parser validates
 	// the argument. Anything not listed gets the default "synthetic".
 	syntheticValues := map[string]string{
-		"port":                   "12345",
-		"idle-timeout":           "1s",
-		"websearch-fetch-budget": "1024",
+		"port":         "12345",
+		"idle-timeout": "1s",
 	}
 	for _, f := range rootCommand.AllFlags() {
 		name := "--" + f.Name

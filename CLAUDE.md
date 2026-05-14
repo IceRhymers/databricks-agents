@@ -31,6 +31,8 @@ The root package is a set of `.go` files that act as thin facades wiring togethe
 - **state.go** — `persistentState` struct: JSON schema for `~/.claude/.databricks-claude.json` (profile, port, CLI path, OTEL table names).
 - **hooks.go** — Session hook install/uninstall (`installHooks`, `uninstallHooks`).
 - **ensureconfig.go** — Bootstrap helpers for first-run settings setup.
+- **commands.go** — Source-of-truth `rootCommand` declaration plus `desktopCommand` / `setupCommand` / `configCommand` / `serveCommand` tree nodes. Drives parsing (via `internal/cmd.Command.Parse`), help (via `cmd.Render` against the `Long` template fields), and shell completion (via `CompletionFlags()` / `CompletionSubcommands()` exposed through `completion_flags.go`).
+- **config.go** — `config` subcommand runner introduced in #172. Dispatches `config otel enable|disable`, `config websearch enable|disable`, `config write`, `config show`. Pure-function resolvers `resolveConfigOTEL` and `resolveConfigWebSearch` make the orchestration matrix testable in isolation. Storage semantics (two-store model, sentinel-guarded writers, OTEL section *removal* on disable, state-file preservation) are byte-identical with the legacy root flags this subcommand replaced.
 - **completion_flags.go** — `flagDefs` slice driving shell completion and flag parsing; `knownSubcommands` slice driving subcommand-name completion.
 - **databrickscfg.go** — Reads `~/.databrickscfg` section headers for profile name resolution.
 - **desktop_config.go** — `desktop` subcommand: `generate-config` writing `.mobileconfig`, `.reg`, and `.json` artifacts for Claude Desktop.
@@ -74,7 +76,7 @@ Each package is independently importable with no cross-dependencies:
 - **No breaking changes to settings.json** — a botched restore leaves the user's Claude config pointing at a dead proxy. Any change to key names, restore logic, or the save/restore lifecycle requires extreme care.
 - **Atomic file writes everywhere** — all JSON writes (settings, registry, persistent config) use temp-file + `os.Rename` in the same directory.
 - **Session handoff** — when multiple `databricks-claude` instances run concurrently, the exiting one hands `ANTHROPIC_BASE_URL` to the most recent survivor.
-- **OTEL key persistence** — when `--otel` is active, OTEL keys survive settings restore (controlled by `otelKeysPersistent` flag).
+- **OTEL key persistence** — when OTEL is active (state file has any `otel_*_table` set, or settings.json carries OTEL keys), OTEL keys survive settings restore (controlled by `otelKeysPersistent` flag).
 
 ## Testing Patterns
 

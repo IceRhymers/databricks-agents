@@ -64,30 +64,22 @@ var rootCommand = cmd.Command{
 	// The few flags that previously ordered "profile" first now have
 	// it pulled into Persistent (which renders first in AllFlags), so
 	// "profile" still leads the completion script.
+	//
+	// #172 removed 14 "persistent config editor" flags from the root —
+	// they live under `config` now (config otel enable|disable, config
+	// websearch enable|disable, config write, config show). The root is
+	// the transparent-proxy launcher; persistent state mutation lives
+	// under its own subcommand tree.
 	Flags: []cmd.FlagDef{
 		{Name: "verbose", Short: "v", Description: "Enable debug logging to stderr"},
 		{Name: "version", Description: "Print version and exit"},
 		{Name: "help", Short: "h", Description: "Show help message"},
-		{Name: "print-env", Description: "Print resolved configuration (token redacted) and exit"},
-		{Name: "otel", Description: "Enable OpenTelemetry logs/metrics export"},
-		{Name: "no-otel", Description: "Disable OpenTelemetry (clears all signal keys + telemetry toggle)"},
-		{Name: "no-otel-metrics", Description: "Clear persisted OTel metrics keys from settings.json"},
-		{Name: "no-otel-logs", Description: "Clear persisted OTel logs keys from settings.json"},
-		{Name: "no-otel-traces", Description: "Clear persisted OTel traces keys from settings.json"},
-		{Name: "otel-metrics-table", Description: "Unity Catalog table for OTel metrics (cat.schema.table)", TakesArg: true,
-			StateKey: "otel_metrics_table"},
-		{Name: "otel-logs-table", Description: "Unity Catalog table for OTel logs (cat.schema.table)", TakesArg: true,
-			StateKey: "otel_logs_table"},
-		{Name: "otel-traces", Description: "Enable OpenTelemetry traces export (Claude Code beta)"},
-		{Name: "otel-traces-table", Description: "Unity Catalog table for OTel traces (cat.schema.table)", TakesArg: true,
-			StateKey: "otel_traces_table"},
 		{Name: "upstream", Description: "Override upstream claude binary path", TakesArg: true, Completer: "__files"},
 		{Name: "log-file", Description: "Write debug logs to file (combinable with --verbose)", TakesArg: true, Completer: "__files"},
 		{Name: "proxy-api-key", Description: "Require this API key on all proxy requests", TakesArg: true},
 		{Name: "tls-cert", Description: "TLS certificate file for the local proxy (requires --tls-key)", TakesArg: true, Completer: "__files"},
 		{Name: "tls-key", Description: "TLS private key file for the local proxy (requires --tls-cert)", TakesArg: true, Completer: "__files"},
 		{Name: "headless", Description: "Start proxy without launching claude (for IDE extensions or hooks)"},
-		{Name: "write-claude-config", Description: "Write first-run settings.json env block and exit (no proxy, no port bind)"},
 		{Name: "idle-timeout", Description: "Idle timeout for headless mode (default: 30m; 0 disables; use e.g. 30s, 5m, 1h)", TakesArg: true,
 			Default: "30m"},
 		{Name: "install-hooks", Description: "Install SessionStart/Stop hooks into ~/.claude/settings.json"},
@@ -96,12 +88,6 @@ var rootCommand = cmd.Command{
 		{Name: "headless-release", Description: "Decrement proxy refcount — called by the Stop hook"},
 		{Name: "no-update-check", Description: "Skip the automatic update check on startup",
 			EnvVar: "DATABRICKS_NO_UPDATE_CHECK"},
-		{Name: "with-websearch", Description: "Locally fulfill Anthropic web_search/web_fetch tools (workaround for FMAPI gap)",
-			StateKey: "with_websearch"},
-		{Name: "websearch-backend", Description: "Web search backend (duckduckgo|none)", TakesArg: true,
-			StateKey: "websearch_backend", Default: "duckduckgo"},
-		{Name: "websearch-fetch-budget", Description: "Per-fetch byte budget for --with-websearch (default 102400)", TakesArg: true,
-			StateKey: "websearch_fetch_budget", Default: "102400"},
 		// NOTE: --daemon and --daemon-fake-key are *desktop generate-config*
 		// flags and are deliberately not declared here. They were previously
 		// in the root flag set so completion would offer them, but completion
@@ -132,6 +118,7 @@ var rootCommand = cmd.Command{
 		{Name: "update", Short: "Check for a newer release and print upgrade instructions"},
 		desktopCommand,
 		setupCommand,
+		configCommand,
 		serveCommand,
 	},
 }
@@ -250,32 +237,15 @@ Usage:
   databricks-claude [databricks-claude flags] [claude flags] [claude args]
 
 Databricks-Claude Flags:
-  --profile string      Databricks config profile (saved to ~/.claude/.databricks-claude.json)
-  --upstream string     Override the AI Gateway URL (default: auto-discovered)
-  --print-env           Print resolved configuration and exit (token redacted)
-  --verbose, -v         Enable debug logging to stderr
-  --log-file string     Write debug logs to a file (combinable with --verbose)
-  --otel                       Enable OpenTelemetry metrics + logs export
-  --otel-metrics-table string  Unity Catalog table for OTEL metrics
-  --otel-logs-table string     Unity Catalog table for OTEL logs (derived from metrics table if omitted)
-  --otel-traces                Enable OpenTelemetry traces export (Claude Code beta;
-                               requires --otel-traces-table; can be used standalone)
-  --otel-traces-table string   Unity Catalog table for OTEL traces (cat.schema.table)
-  --no-otel                    Clear persisted OTEL keys and disable OTEL for future sessions
-  --no-otel-metrics            Clear persisted OTEL metrics keys (other signals untouched)
-  --no-otel-logs               Clear persisted OTEL logs keys (other signals untouched)
-  --no-otel-traces             Clear persisted OTEL traces keys (other signals untouched)
+  --profile string             Databricks config profile (saved to ~/.claude/.databricks-claude.json)
+  --upstream string            Override the AI Gateway URL (default: auto-discovered)
+  --verbose, -v                Enable debug logging to stderr
+  --log-file string            Write debug logs to a file (combinable with --verbose)
   --proxy-api-key string       Require Bearer token auth on all proxy requests
   --tls-cert string            Path to TLS certificate file (requires --tls-key)
   --tls-key string             Path to TLS private key file (requires --tls-cert)
   --port int                   Fixed proxy port (default: 49153, saved to state)
   --headless                   Start proxy without launching claude (for IDE extensions)
-  --write-claude-config        Write first-run settings.json env block (proxy URL, model
-                               routing, custom headers) and exit — no proxy startup, no
-                               port binding, no child process. Designed for MDM / fleet
-                               init scripts and as a cleaner alternative to the
-                               '--headless then Ctrl+C' workaround. Idempotent.
-                               Accepts --profile, --port, and OTEL table flags.
   --headless-ensure            Start proxy if not running (called by SessionStart hook)
   --headless-release           Decrement proxy refcount (called by Stop hook)
   --idle-timeout duration      Idle timeout for headless mode (default 30m, 0 disables; use e.g. 30s, 5m, 1h)
@@ -284,12 +254,6 @@ Databricks-Claude Flags:
                                persist them; no prior databricks-claude invocation needed.
   --uninstall-hooks            Remove databricks-claude hooks from ~/.claude/settings.json
   --no-update-check            Skip the automatic update check on startup
-  --with-websearch             Enable local fulfillment of Anthropic web_search/web_fetch
-                               tools (workaround until Databricks FMAPI ships native
-                               support; saved to state). Default: disabled.
-  --websearch-backend string   Search backend when --with-websearch is enabled.
-                               Values: duckduckgo (default, zero config), none
-  --websearch-fetch-budget int Max bytes returned per web_fetch call (default 102400)
   --version                    Print version and exit
   --help, -h                   Show this help message
 
@@ -302,6 +266,14 @@ Subcommands:
                                runs 'databricks auth login' when not authenticated. Designed
                                for fleet init scripts and per-user login agents.
                                Run 'databricks-claude setup --help' for flags.
+  config <subcommand>          Persistent config editor. Mutates settings.json env block
+                               and ~/.claude/.databricks-claude.json for FUTURE runs (does
+                               not affect the current invocation).
+                                 config otel enable|disable      Toggle OTEL signals
+                                 config websearch enable|disable Toggle web_search/_fetch
+                                 config write                    Bootstrap settings.json
+                                 config show                     Print resolved config
+                               Run 'databricks-claude config --help' for details.
   serve [install|uninstall|status|flags]
                                Long-lived daemon serving Claude Code and Claude
                                Desktop with persistent Databricks OAuth. Owns
@@ -621,4 +593,353 @@ Examples:
   databricks-claude desktop generate-trust-profile \
     --cert ./codesign-cert.pem \
     --output dist/databricks-claude-trust.mobileconfig
+`
+
+// configCommand declares the `config` subcommand tree introduced in #172.
+// Consolidates the 14 "persistent config editor" flags (--otel*, --no-otel*,
+// --with-websearch / --websearch-*, --write-claude-config, --print-env) that
+// previously lived on the root command into a discoverable tree. Storage
+// semantics — two-store model (settings.json env block vs. state file),
+// sentinel-guard write logic, --no-otel*-preserves-state-file behavior, OTEL
+// section *removal* (not just skip-the-write) — are unchanged; this is a
+// pure surface reshape.
+//
+// Tree shape:
+//
+//	config
+//	├── otel
+//	│   ├── enable     [--metrics-table T] [--logs-table T] [--traces] [--traces-table T]
+//	│   └── disable    [--metrics] [--logs] [--traces]      (no flags = all signals)
+//	├── websearch
+//	│   ├── enable     [--backend duckduckgo|none] [--fetch-budget N]
+//	│   └── disable
+//	├── write          (was --write-claude-config)
+//	└── show           (was --print-env)
+//
+// Each leaf re-declares --profile / --port locally where it needs them.
+// Persistent-flag inheritance from the root is not yet enforced at parse
+// time (see internal/cmd.Command.Persistent doc), so leaves carry their
+// own flag declarations — mirrors how serveCommand re-declares --port /
+// --profile on its own Flags slice.
+var configCommand = cmd.Command{
+	Name:  "config",
+	Short: "Persistent config editor (otel, websearch, write, show)",
+	Long:  configHelpTemplate,
+	Subcommands: []cmd.Command{
+		{
+			Name:  "otel",
+			Short: "Toggle OpenTelemetry signals (enable|disable)",
+			Long:  configOtelHelpTemplate,
+			Subcommands: []cmd.Command{
+				{
+					Name:  "enable",
+					Short: "Enable OTEL — write OTEL keys into ~/.claude/settings.json",
+					Long:  configOtelEnableHelpTemplate,
+					Flags: []cmd.FlagDef{
+						{Name: "metrics-table", Description: "Unity Catalog table for OTEL metrics (cat.schema.table)", TakesArg: true, StateKey: "otel_metrics_table"},
+						{Name: "logs-table", Description: "Unity Catalog table for OTEL logs (cat.schema.table)", TakesArg: true, StateKey: "otel_logs_table"},
+						{Name: "traces", Description: "Enable OTEL traces export (Claude Code beta)"},
+						{Name: "traces-table", Description: "Unity Catalog table for OTEL traces (cat.schema.table)", TakesArg: true, StateKey: "otel_traces_table"},
+						{Name: "profile", Description: "Databricks CLI profile (default: state file > DEFAULT)", TakesArg: true, Completer: "__databricks_profiles", StateKey: "profile", MDMKey: "databricksProfile", Default: "DEFAULT"},
+						{Name: "port", Description: "Proxy listen port (default: state file > 49153)", TakesArg: true, StateKey: "port", Default: "49153"},
+						{Name: "help", Short: "h", Description: "Show help message"},
+					},
+				},
+				{
+					Name:  "disable",
+					Short: "Disable OTEL — clear OTEL keys from ~/.claude/settings.json (state file preserved)",
+					Long:  configOtelDisableHelpTemplate,
+					Flags: []cmd.FlagDef{
+						{Name: "metrics", Description: "Clear only OTEL metrics keys"},
+						{Name: "logs", Description: "Clear only OTEL logs keys"},
+						{Name: "traces", Description: "Clear only OTEL traces keys"},
+						{Name: "help", Short: "h", Description: "Show help message"},
+					},
+				},
+			},
+		},
+		{
+			Name:  "websearch",
+			Short: "Toggle local web_search/web_fetch fulfillment (enable|disable)",
+			Long:  configWebSearchHelpTemplate,
+			Subcommands: []cmd.Command{
+				{
+					Name:  "enable",
+					Short: "Enable websearch workaround — saved to state file",
+					Long:  configWebSearchEnableHelpTemplate,
+					Flags: []cmd.FlagDef{
+						{Name: "backend", Description: "Web search backend (duckduckgo|none)", TakesArg: true, StateKey: "websearch_backend", Default: "duckduckgo"},
+						{Name: "fetch-budget", Description: "Per-fetch byte budget for web_fetch (default 102400)", TakesArg: true, StateKey: "websearch_fetch_budget", Default: "102400"},
+						{Name: "help", Short: "h", Description: "Show help message"},
+					},
+				},
+				{
+					Name:  "disable",
+					Short: "Disable websearch workaround — clears state file keys",
+					Long:  configWebSearchDisableHelpTemplate,
+					Flags: []cmd.FlagDef{
+						{Name: "help", Short: "h", Description: "Show help message"},
+					},
+				},
+			},
+		},
+		{
+			Name:  "write",
+			Short: "Write first-run settings.json env block (was --write-claude-config)",
+			Long:  configWriteHelpTemplate,
+			Flags: []cmd.FlagDef{
+				{Name: "profile", Description: "Databricks CLI profile (default: state file > DEFAULT)", TakesArg: true, Completer: "__databricks_profiles", StateKey: "profile", MDMKey: "databricksProfile", Default: "DEFAULT"},
+				{Name: "port", Description: "Proxy port for ANTHROPIC_BASE_URL (default: state file > 49153)", TakesArg: true, StateKey: "port", Default: "49153"},
+				{Name: "metrics-table", Description: "Unity Catalog table for OTEL metrics", TakesArg: true, StateKey: "otel_metrics_table"},
+				{Name: "logs-table", Description: "Unity Catalog table for OTEL logs", TakesArg: true, StateKey: "otel_logs_table"},
+				{Name: "traces", Description: "Enable OTEL traces export"},
+				{Name: "traces-table", Description: "Unity Catalog table for OTEL traces", TakesArg: true, StateKey: "otel_traces_table"},
+				{Name: "with-websearch", Description: "Enable websearch workaround", StateKey: "with_websearch"},
+				{Name: "backend", Description: "Web search backend (duckduckgo|none)", TakesArg: true, StateKey: "websearch_backend", Default: "duckduckgo"},
+				{Name: "fetch-budget", Description: "Per-fetch byte budget for web_fetch (default 102400)", TakesArg: true, StateKey: "websearch_fetch_budget", Default: "102400"},
+				{Name: "help", Short: "h", Description: "Show help message"},
+			},
+		},
+		{
+			Name:  "show",
+			Short: "Print resolved configuration (was --print-env)",
+			Long:  configShowHelpTemplate,
+			Flags: []cmd.FlagDef{
+				{Name: "profile", Description: "Databricks CLI profile (default: state file > DEFAULT)", TakesArg: true, Completer: "__databricks_profiles", StateKey: "profile", MDMKey: "databricksProfile", Default: "DEFAULT"},
+				{Name: "port", Description: "Proxy port for the displayed ANTHROPIC_BASE_URL", TakesArg: true, StateKey: "port", Default: "49153"},
+				{Name: "help", Short: "h", Description: "Show help message"},
+			},
+		},
+	},
+}
+
+const configHelpTemplate = `Usage: databricks-claude config <subcommand> [flags]
+
+Persistent config editor. Mutates ~/.claude/settings.json (env block) and
+~/.claude/.databricks-claude.json (state file) for FUTURE invocations.
+None of these subcommands affect the current invocation — they are pure
+config-editor commands. Storage semantics match the legacy root flags
+they replace exactly.
+
+Subcommands:
+  otel enable [flags]       Enable OTEL signals; writes OTEL keys + tables
+                            into settings.json env block.
+  otel disable [flags]      Clear OTEL keys from settings.json. State-file
+                            table preferences are PRESERVED so a subsequent
+                            'config otel enable' restores them.
+  websearch enable [flags]  Enable local web_search/web_fetch fulfillment
+                            (workaround for FMAPI gap). State file only.
+  websearch disable         Clear websearch state-file keys.
+  write [flags]             Write the full first-run settings.json env block
+                            (proxy URL, model routing, custom headers,
+                            optional OTEL keys). Idempotent.
+  show [flags]              Print resolved configuration (token redacted).
+                            Read-only — no writes.
+
+Run 'databricks-claude config <subcommand> --help' for per-subcommand flags.
+
+Examples:
+  # Enable OTEL with explicit metrics + logs tables:
+  databricks-claude config otel enable \
+    --metrics-table main.claude_telemetry.claude_otel_metrics \
+    --logs-table   main.claude_telemetry.claude_otel_logs
+
+  # Disable just metrics (logs + traces still routed if previously enabled):
+  databricks-claude config otel disable --metrics
+
+  # Disable everything OTEL:
+  databricks-claude config otel disable
+
+  # Turn on local websearch workaround:
+  databricks-claude config websearch enable --backend duckduckgo
+
+  # First-run settings.json bootstrap:
+  databricks-claude config write --profile my-workspace
+
+  # Diagnostic dump:
+  databricks-claude config show
+
+Exit codes:
+  0   success
+  1   write/discovery failure
+  2   missing or unknown subcommand
+`
+
+const configOtelHelpTemplate = `Usage: databricks-claude config otel <enable|disable> [flags]
+
+Toggle OpenTelemetry signal export for Claude Code. Storage:
+  - Tables (metrics/logs/traces) are persisted to ~/.claude/.databricks-claude.json
+  - OTEL env keys (OTEL_EXPORTER_OTLP_*_ENDPOINT, CLAUDE_OTEL_UC_*_TABLE,
+    CLAUDE_CODE_ENABLE_TELEMETRY) are written into ~/.claude/settings.json's
+    env block.
+
+'config otel disable' clears settings.json keys but PRESERVES the state
+file so a subsequent 'config otel enable' can restore the table preferences.
+
+Subcommands:
+  enable    Write OTEL keys + tables (see 'config otel enable --help').
+  disable   Clear OTEL keys (see 'config otel disable --help').
+`
+
+const configOtelEnableHelpTemplate = `Usage: databricks-claude config otel enable [flags]
+
+Enable OTEL — writes OTEL env keys into ~/.claude/settings.json and persists
+the resolved table names to ~/.claude/.databricks-claude.json.
+
+Resolution chain per signal: explicit flag > state file > derive (logs from
+metrics) > unset. With no table flags and an empty state file, --metrics-table
+defaults to 'main.claude_telemetry.claude_otel_metrics' (matching the legacy
+'--otel' bare-toggle behavior).
+
+Flags:
+  --metrics-table string   Unity Catalog table for OTEL metrics (cat.schema.table)
+  --logs-table string      Unity Catalog table for OTEL logs   (cat.schema.table)
+  --traces                 Enable OTEL traces export (Claude Code beta)
+  --traces-table string    Unity Catalog table for OTEL traces (cat.schema.table)
+  --profile string         Databricks CLI profile (default: state > DEFAULT)
+  --port int               Proxy port (default: state > 49153)
+  --help, -h               Show this help message
+
+Examples:
+  # Enable with custom metrics + logs tables:
+  databricks-claude config otel enable \
+    --metrics-table main.telemetry.claude_otel_metrics \
+    --logs-table   main.telemetry.claude_otel_logs
+
+  # Enable with default tables (metrics-table inferred):
+  databricks-claude config otel enable
+
+  # Enable traces alongside metrics + logs:
+  databricks-claude config otel enable --traces --traces-table main.telemetry.claude_otel_traces
+`
+
+const configOtelDisableHelpTemplate = `Usage: databricks-claude config otel disable [flags]
+
+Clear OTEL env keys from ~/.claude/settings.json. State-file table
+preferences are PRESERVED — a subsequent 'config otel enable' will restore
+them. With no flags, ALL signal keys are cleared (plus CLAUDE_CODE_ENABLE_TELEMETRY).
+
+Flags:
+  --metrics    Clear only OTEL metrics keys (other signals untouched)
+  --logs       Clear only OTEL logs keys
+  --traces     Clear only OTEL traces keys
+  --help, -h   Show this help message
+
+Examples:
+  # Disable everything:
+  databricks-claude config otel disable
+
+  # Disable just metrics:
+  databricks-claude config otel disable --metrics
+
+  # Disable metrics + logs together (traces stay live):
+  databricks-claude config otel disable --metrics --logs
+`
+
+const configWebSearchHelpTemplate = `Usage: databricks-claude config websearch <enable|disable> [flags]
+
+Toggle local web_search / web_fetch fulfillment in the proxy. This is a
+workaround for the gap where Databricks FMAPI does not (yet) support
+Anthropic's native server-side tool fulfillment. Storage: state file only —
+websearch is a proxy-side feature controlled entirely by
+~/.claude/.databricks-claude.json. Settings.json is NOT touched.
+
+Subcommands:
+  enable    Set with_websearch=true (see 'config websearch enable --help').
+  disable   Set with_websearch=false (clears related state keys).
+`
+
+const configWebSearchEnableHelpTemplate = `Usage: databricks-claude config websearch enable [flags]
+
+Persist with_websearch=true to the state file so the proxy fulfills
+web_search / web_fetch tool calls locally on the next start. Reads
+backend / fetch-budget from flags and falls back to defaults.
+
+Flags:
+  --backend string        Search backend (duckduckgo|none)         [default: duckduckgo]
+  --fetch-budget int      Max bytes returned per web_fetch call    [default: 102400]
+  --help, -h              Show this help message
+
+Examples:
+  # Default (DuckDuckGo, 100 KB budget):
+  databricks-claude config websearch enable
+
+  # Disable scraping but keep web_fetch:
+  databricks-claude config websearch enable --backend none
+
+  # Bump the per-fetch byte budget:
+  databricks-claude config websearch enable --fetch-budget 204800
+`
+
+const configWebSearchDisableHelpTemplate = `Usage: databricks-claude config websearch disable
+
+Clear with_websearch from the state file (sets it to false). Backend +
+fetch-budget keys are also cleared so a future 'config websearch enable'
+re-applies the defaults. New behaviour vs. the legacy CLI (which had no
+explicit websearch disable flag).
+
+Flags:
+  --help, -h   Show this help message
+`
+
+const configWriteHelpTemplate = `Usage: databricks-claude config write [flags]
+
+Write the first-run ~/.claude/settings.json env block (proxy URL, model
+routing, custom headers, optional OTEL keys) and exit. No proxy startup,
+no port binding, no child process — purely a settings-bootstrap. Designed
+for MDM / fleet init scripts and as a cleaner alternative to the
+'--headless then Ctrl+C' workaround. Idempotent.
+
+This was the legacy --write-claude-config flag.
+
+Flags:
+  --profile string         Databricks CLI profile (default: state > DEFAULT)
+  --port int               Proxy port written into ANTHROPIC_BASE_URL (default: state > 49153)
+  --metrics-table string   OTEL metrics UC table (persisted to state)
+  --logs-table string      OTEL logs UC table    (persisted to state)
+  --traces                 Honor traces beta flag for OTEL traces export
+  --traces-table string    OTEL traces UC table  (persisted to state)
+  --with-websearch         Enable local websearch fulfillment (persisted to state)
+  --backend string         Web search backend (duckduckgo|none)
+  --fetch-budget int       Per-fetch byte budget for web_fetch
+  --help, -h               Show this help message
+
+Examples:
+  # Bootstrap with default profile + port:
+  databricks-claude config write
+
+  # MDM rollout — bake fleet-wide profile + workspace:
+  databricks-claude config write --profile databricks-ai-inference
+
+  # Bootstrap with OTEL routing AND websearch:
+  databricks-claude config write \
+    --metrics-table main.telemetry.claude_otel_metrics \
+    --logs-table   main.telemetry.claude_otel_logs \
+    --with-websearch
+`
+
+const configShowHelpTemplate = `Usage: databricks-claude config show [flags]
+
+Print the resolved configuration (token redacted) and exit. Read-only —
+zero writes to settings.json or the state file. Replaces the legacy
+--print-env flag.
+
+Resolves: profile, Databricks workspace host, AI Gateway URL,
+ANTHROPIC_AUTH_TOKEN (redacted), upstream claude binary, OTEL active flag,
+and any persisted OTEL UC tables.
+
+Flags:
+  --profile string   Databricks CLI profile (default: state > DEFAULT)
+  --port int         Port used to display the proxy URL (default: state > 49153)
+  --help, -h         Show this help message
+
+Example output:
+
+  databricks-claude configuration:
+    Profile:              DEFAULT
+    DATABRICKS_HOST:      https://adb-...azuredatabricks.net
+    ANTHROPIC_BASE_URL:   https://adb-.../ai-gateway/anthropic
+    ANTHROPIC_AUTH_TOKEN: dapi-***
+    Upstream binary:      /usr/local/bin/claude
+    OTEL enabled:         false
 `
