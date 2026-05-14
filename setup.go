@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 
+	"github.com/IceRhymers/databricks-claude/internal/cmd"
 	"github.com/IceRhymers/databricks-claude/pkg/authcheck"
 )
 
@@ -29,14 +29,15 @@ var setupExecCommand = exec.Command
 //     stdin/stdout/stderr (interactive browser OAuth flow).
 //  5. Re-check authentication. Exit 0 on success, 1 on failure.
 func runSetupCommand(args []string) {
-	if hasFlag(args, "--help") || hasFlag(args, "-h") {
-		printSetupHelp()
+	r, _ := setupCommand.Parse(args)
+	if r.Bools["help"] {
+		_ = cmd.Render(os.Stderr, setupCommand, nil)
 		os.Exit(0)
 	}
 
-	profile := extractProfileFlag(args)
-	host := extractSetupHostFlag(args)
-	force := hasFlag(args, "--force")
+	profile := r.Strings["profile"]
+	host := r.Strings["host"]
+	force := r.Bools["force"]
 
 	state := loadState()
 	resolved := profile
@@ -89,64 +90,13 @@ func runSetupCommand(args []string) {
 	os.Exit(0)
 }
 
-// extractSetupHostFlag scans args for --host / --host=value.
+// extractSetupHostFlag scans args for --host / --host=value. Kept after #171
+// because setup_test.go still drives it; runSetupCommand itself no longer
+// uses it (it walks the tree-driven parse path via setupCommand.Parse).
 func extractSetupHostFlag(args []string) string {
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--host" && i+1 < len(args) {
-			return args[i+1]
-		}
-		if strings.HasPrefix(a, "--host=") {
-			return strings.TrimPrefix(a, "--host=")
-		}
-	}
-	return ""
+	r, _ := setupCommand.Parse(args)
+	return r.Strings["host"]
 }
 
-// printSetupHelp prints usage for the `setup` subcommand to stderr.
-func printSetupHelp() {
-	fmt.Fprint(os.Stderr, `Usage: databricks-claude setup [flags]
-
-Idempotent auth bootstrap for the active Databricks CLI profile. Designed for
-fleet init scripts and per-user login agents — safe to re-run on every login.
-
-Behaviour:
-  1. Resolve profile (flag > saved state > "DEFAULT") and persist it to
-     ~/.claude/.databricks-claude.json so subsequent databricks-claude
-     invocations (including the Desktop credential helper) pick it up.
-  2. If already authenticated for that profile, print a success line and
-     exit 0 without spawning a browser. Use --force to override.
-  3. Otherwise exec "databricks auth login --profile X [--host Y]" with
-     attached stdin/stdout/stderr (interactive browser OAuth flow).
-  4. Re-check authentication. Exit 0 on success, non-zero on failure.
-
-Flags:
-  --profile NAME    Databricks CLI profile to bootstrap (default: saved
-                    state > "DEFAULT")
-  --host URL        Databricks workspace URL, forwarded verbatim to
-                    "databricks auth login --host" (only used on first
-                    login for a profile; subsequent runs reuse the host
-                    cached in ~/.databrickscfg)
-  --force           Always re-run "databricks auth login" even when already
-                    authenticated (use when switching workspaces or after
-                    revoking tokens)
-  --help, -h        Show this help message
-
-Examples:
-  # First-time bootstrap on a new endpoint (fleet init script):
-  databricks-claude setup \
-    --profile databricks-ai-inference \
-    --host https://my-ai-workspace.cloud.databricks.com
-
-  # Idempotent re-run (no-op when authed) — safe in a LaunchAgent:
-  databricks-claude setup --profile databricks-ai-inference
-
-  # Force a re-login (switched workspaces, or revoked the old token):
-  databricks-claude setup --profile databricks-ai-inference --force
-
-Exit codes:
-  0   already authenticated, or login succeeded
-  1   state write failed, or auth login failed, or still unauthenticated
-      after login
-`)
-}
+// Help for `setup` is rendered via cmd.Render against setupCommand
+// (commands.go). The hand-rolled printSetupHelp was deleted in #171.

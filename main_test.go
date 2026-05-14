@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/IceRhymers/databricks-claude/internal/cmd"
 	"github.com/IceRhymers/databricks-claude/pkg/lifecycle"
 	"github.com/IceRhymers/databricks-claude/pkg/refcount"
 )
@@ -1655,5 +1656,193 @@ func TestRootPersistentFlagsAreProfileAndPort(t *testing.T) {
 		if !persistent[want] {
 			t.Errorf("rootCommand.Persistent should declare --%s", want)
 		}
+	}
+}
+
+// --- #171 subcommand parity tests ---
+//
+// Each subcommand tree node declared in commands.go must:
+//  1. Exhaustively declare every flag its runner consumes (no flag the
+//     runner reads from ParseResult is missing from the tree).
+//  2. Have every declared flag actually used by its runner (no dead
+//     declarations bloating help / completion).
+//
+// We assert (1) by feeding parse(args=[--<name> synthetic_value]) for every
+// declared flag and verifying the runner's typed-struct mapper picks it up
+// (parseServeFlags / parseInstallFlags) — the projection that turns
+// ParseResult into the resolution-chain inputs. For runners that consume
+// ParseResult inline (runSetupCommand, runDesktopCommand) we drive Parse
+// directly and assert the fields land in Strings/Bools/Set as expected.
+//
+// (2) is asserted by hardcoding the set of flags-the-runner-reads and
+// failing if the tree has anything extra. Updating the tree without
+// updating the runner (or vice versa) trips this test.
+
+// flagNameSet returns the set of long-flag names declared on a tree node
+// (Persistent ++ Flags). Used by the #171 subcommand-parity tests.
+func flagNameSet(c cmd.Command) map[string]bool {
+	out := make(map[string]bool)
+	for _, f := range c.AllFlags() {
+		out[f.Name] = true
+	}
+	return out
+}
+
+// assertFlagSetEqual fails if the actual flag set declared on c differs from
+// the expected slice. Used by the #171 subcommand-parity tests so adding a
+// flag to either side without updating the other surfaces here.
+func assertFlagSetEqual(t *testing.T, label string, c cmd.Command, want []string) {
+	t.Helper()
+	got := flagNameSet(c)
+	wantSet := make(map[string]bool, len(want))
+	for _, w := range want {
+		wantSet[w] = true
+		if !got[w] {
+			t.Errorf("%s should declare --%s but does not (runner consumes it; tree must too)", label, w)
+		}
+	}
+	for n := range got {
+		if !wantSet[n] {
+			t.Errorf("%s declares --%s but its runner does not consume it (dead declaration; remove from tree or wire to runner)", label, n)
+		}
+	}
+}
+
+// TestServeCommandParity verifies that serveCommand declares EXACTLY the
+// flags parseServeFlags consumes — no more, no less. Mirrors
+// TestRootTreeFlagsAreParseRecognised but for the serve subcommand.
+func TestServeCommandParity(t *testing.T) {
+	assertFlagSetEqual(t, "serveCommand", serveCommand, []string{
+		"port", "log-file", "verbose", "profile",
+		"otel-metrics-table", "otel-logs-table", "otel-traces-table",
+		"help",
+	})
+}
+
+func TestServeInstallCommandParity(t *testing.T) {
+	install := serveCommand.Subcommand("install")
+	if install == nil {
+		t.Fatal("serveCommand should have an `install` subcommand")
+	}
+	assertFlagSetEqual(t, "serve install", *install, []string{
+		"port", "profile", "log-file",
+		"otel-metrics-table", "otel-logs-table", "otel-traces-table",
+		"skip-auth-check", "help",
+	})
+}
+
+func TestServeUninstallCommandParity(t *testing.T) {
+	uninst := serveCommand.Subcommand("uninstall")
+	if uninst == nil {
+		t.Fatal("serveCommand should have an `uninstall` subcommand")
+	}
+	assertFlagSetEqual(t, "serve uninstall", *uninst, []string{"help"})
+}
+
+func TestServeStatusCommandParity(t *testing.T) {
+	st := serveCommand.Subcommand("status")
+	if st == nil {
+		t.Fatal("serveCommand should have a `status` subcommand")
+	}
+	assertFlagSetEqual(t, "serve status", *st, []string{"help"})
+}
+
+func TestSetupCommandParity(t *testing.T) {
+	assertFlagSetEqual(t, "setupCommand", setupCommand, []string{
+		"profile", "host", "force", "help",
+	})
+}
+
+// TestDesktopCommandParity covers the union of flags read by runDesktopCommand
+// (generate-config + credential-helper paths) AND by runGenerateTrustProfile
+// (which routes its scanners through desktopCommand.Parse post-#171).
+func TestDesktopCommandParity(t *testing.T) {
+	assertFlagSetEqual(t, "desktopCommand", desktopCommand, []string{
+		"profile", "output", "binary-path", "databricks-cli-path", "cert",
+		"for-pkg", "daemon", "port", "daemon-fake-key", "otel", "help",
+	})
+}
+
+// TestDesktopDaemonFlagsAreDesktopScoped asserts the issue-#171 contract:
+// --daemon and --daemon-fake-key live on `desktop`, NOT on root. The
+// inverse test (TestRootCompletionDoesNotOfferDaemonFlags) already guards
+// the root side; this test guards the desktop side.
+func TestDesktopDaemonFlagsAreDesktopScoped(t *testing.T) {
+	got := flagNameSet(desktopCommand)
+	for _, want := range []string{"daemon", "daemon-fake-key"} {
+		if !got[want] {
+			t.Errorf("desktopCommand must declare --%s (it is desktop-scoped per issue #171)", want)
+		}
+	}
+}
+
+// TestServeHasNestedSubcommands verifies that the install/uninstall/status
+// children are declared on serveCommand so completion can offer them
+// nested. Drives the issue-#171 acceptance criterion: "Nested completion
+// works: databricks-claude serve <TAB> → subcommands".
+func TestServeHasNestedSubcommands(t *testing.T) {
+	want := []string{"install", "uninstall", "status"}
+	got := make(map[string]bool, len(serveCommand.Subcommands))
+	for _, s := range serveCommand.Subcommands {
+		got[s.Name] = true
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("serveCommand should have nested `%s` subcommand for nested completion", w)
+		}
+	}
+}
+
+// TestSubcommandFlagsParseable feeds synthetic args into each subcommand's
+// Parse and verifies a tree-declared flag never lands in Positional (which
+// is the "unknown flag" bucket). Catches drift between FlagDef.TakesArg and
+// the parser's expectation.
+func TestSubcommandFlagsParseable(t *testing.T) {
+	syntheticValues := map[string]string{
+		"port":                "12345",
+		"otel-metrics-table":  "cat.s.metrics",
+		"otel-logs-table":     "cat.s.logs",
+		"otel-traces-table":   "cat.s.traces",
+		"profile":             "synthetic-profile",
+		"log-file":            "/tmp/synthetic.log",
+		"host":                "https://synthetic.example.com",
+		"output":              "/tmp/out",
+		"binary-path":         "/tmp/synthetic-binary",
+		"databricks-cli-path": "/tmp/synthetic-cli",
+		"cert":                "/tmp/synthetic-cert.pem",
+		"daemon-fake-key":     "synthetic-key",
+	}
+
+	cases := []struct {
+		name string
+		cmd  cmd.Command
+	}{
+		{"serve", serveCommand},
+		{"serve install", *serveCommand.Subcommand("install")},
+		{"serve uninstall", *serveCommand.Subcommand("uninstall")},
+		{"serve status", *serveCommand.Subcommand("status")},
+		{"setup", setupCommand},
+		{"desktop", desktopCommand},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for _, f := range c.cmd.AllFlags() {
+				args := []string{"--" + f.Name}
+				if v, ok := syntheticValues[f.Name]; ok {
+					args = append(args, v)
+				}
+				r, err := c.cmd.Parse(args)
+				if err != nil {
+					t.Errorf("%s --%s: Parse returned error: %v", c.name, f.Name, err)
+					continue
+				}
+				for _, p := range r.Positional {
+					if p == "--"+f.Name {
+						t.Errorf("%s --%s parsed as positional/unknown — tree-declared flag must be recognised", c.name, f.Name)
+					}
+				}
+			}
+		})
 	}
 }

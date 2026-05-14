@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/IceRhymers/databricks-claude/internal/cmd"
 	"github.com/IceRhymers/databricks-claude/pkg/authcheck"
 	"github.com/IceRhymers/databricks-claude/pkg/cli"
 	"github.com/IceRhymers/databricks-claude/pkg/health"
@@ -81,9 +82,15 @@ func defaultLogFile() (string, error) {
 }
 
 // runServeInstall dispatches serve install/uninstall/status sub-subcommands.
+//
+// runServe only routes here when args[0] is one of those three keywords, so
+// the bare "no args / --help" branch the legacy printServeInstallRootHelp
+// covered is unreachable in production. Kept as a defensive fallback that
+// renders the parent serveCommand help so a future caller change can't
+// silently regress to "exit 0 with no output".
 func runServeInstall(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		printServeInstallRootHelp()
+		_ = cmd.Render(os.Stderr, serveCommand, nil)
 		os.Exit(0)
 	}
 
@@ -104,6 +111,31 @@ func runServeInstall(args []string) {
 	}
 }
 
+// installCommand returns the cmd.Command node for `serve install`. Single
+// call site today (parseInstallFlags / runInstall help check) but factored
+// out so future edits to serveCommand.Subcommands ordering can't drift the
+// lookup.
+func installCommand() cmd.Command {
+	if c := serveCommand.Subcommand("install"); c != nil {
+		return *c
+	}
+	return cmd.Command{}
+}
+
+func uninstallCommand() cmd.Command {
+	if c := serveCommand.Subcommand("uninstall"); c != nil {
+		return *c
+	}
+	return cmd.Command{}
+}
+
+func statusCommand() cmd.Command {
+	if c := serveCommand.Subcommand("status"); c != nil {
+		return *c
+	}
+	return cmd.Command{}
+}
+
 // installFlags holds the raw parsed flags for 'serve install'.
 type installFlags struct {
 	port            int
@@ -121,53 +153,24 @@ type installFlags struct {
 	skipAuthCheck bool
 }
 
-// parseInstallFlags parses the args slice for 'serve install' flags.
+// parseInstallFlags maps installCommand().Parse(args) into the typed
+// installFlags struct. The flag set is the single source of truth declared
+// on serveCommand.Subcommands["install"] in commands.go (#171).
 func parseInstallFlags(args []string) installFlags {
+	r, _ := installCommand().Parse(args)
 	var f installFlags
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		next := func() string {
-			if i+1 < len(args) {
-				i++
-				return args[i]
-			}
-			return ""
-		}
-		switch {
-		case arg == "--port":
-			f.port, _ = strconv.Atoi(next())
-		case strings.HasPrefix(arg, "--port="):
-			f.port, _ = strconv.Atoi(strings.TrimPrefix(arg, "--port="))
-		case arg == "--profile":
-			f.profile = next()
-		case strings.HasPrefix(arg, "--profile="):
-			f.profile = strings.TrimPrefix(arg, "--profile=")
-		case arg == "--log-file":
-			f.logFile = next()
-		case strings.HasPrefix(arg, "--log-file="):
-			f.logFile = strings.TrimPrefix(arg, "--log-file=")
-		case arg == "--otel-metrics-table":
-			f.metricsTable = next()
-			f.metricsTableSet = true
-		case strings.HasPrefix(arg, "--otel-metrics-table="):
-			f.metricsTable = strings.TrimPrefix(arg, "--otel-metrics-table=")
-			f.metricsTableSet = true
-		case arg == "--otel-logs-table":
-			f.logsTable = next()
-			f.logsTableSet = true
-		case strings.HasPrefix(arg, "--otel-logs-table="):
-			f.logsTable = strings.TrimPrefix(arg, "--otel-logs-table=")
-			f.logsTableSet = true
-		case arg == "--otel-traces-table":
-			f.tracesTable = next()
-			f.tracesTableSet = true
-		case strings.HasPrefix(arg, "--otel-traces-table="):
-			f.tracesTable = strings.TrimPrefix(arg, "--otel-traces-table=")
-			f.tracesTableSet = true
-		case arg == "--skip-auth-check":
-			f.skipAuthCheck = true
-		}
+	if v, ok := r.Strings["port"]; ok {
+		f.port, _ = strconv.Atoi(v)
 	}
+	f.profile = r.Strings["profile"]
+	f.logFile = r.Strings["log-file"]
+	f.metricsTable = r.Strings["otel-metrics-table"]
+	f.metricsTableSet = r.Set["otel-metrics-table"]
+	f.logsTable = r.Strings["otel-logs-table"]
+	f.logsTableSet = r.Set["otel-logs-table"]
+	f.tracesTable = r.Strings["otel-traces-table"]
+	f.tracesTableSet = r.Set["otel-traces-table"]
+	f.skipAuthCheck = r.Bools["skip-auth-check"]
 	return f
 }
 
@@ -193,8 +196,9 @@ func isInteractiveStdin() bool {
 }
 
 func runInstall(args []string) {
-	if hasFlag(args, "--help") || hasFlag(args, "-h") {
-		printServeInstallHelp()
+	r, _ := installCommand().Parse(args)
+	if r.Bools["help"] {
+		_ = cmd.Render(os.Stderr, installCommand(), nil)
 		os.Exit(0)
 	}
 
@@ -344,8 +348,9 @@ func waitForHealth(port int, deadline time.Duration) bool {
 }
 
 func runUninstall(args []string) {
-	if hasFlag(args, "--help") || hasFlag(args, "-h") {
-		printServeUninstallHelp()
+	r, _ := uninstallCommand().Parse(args)
+	if r.Bools["help"] {
+		_ = cmd.Render(os.Stderr, uninstallCommand(), nil)
 		os.Exit(0)
 	}
 
@@ -358,8 +363,9 @@ func runUninstall(args []string) {
 }
 
 func runStatus(args []string) {
-	if hasFlag(args, "--help") || hasFlag(args, "-h") {
-		printServeStatusHelp()
+	r, _ := statusCommand().Parse(args)
+	if r.Bools["help"] {
+		_ = cmd.Render(os.Stderr, statusCommand(), nil)
 		os.Exit(0)
 	}
 
@@ -459,89 +465,8 @@ func probeHealth(port int) (healthy bool, mode, version, profile string) {
 	return true, m, "", ""
 }
 
-// printServeInstallRootHelp prints the top-level help for serve install/uninstall/status.
-func printServeInstallRootHelp() {
-	fmt.Fprint(os.Stderr, `Usage: databricks-claude serve <sub-subcommand> [flags]
-
-Sub-subcommands:
-  install    Register and start the daemon as a per-user OS service
-  uninstall  Stop and remove the daemon OS service registration
-  status     Report Registered / Running / Healthy in one shot
-
-Run 'databricks-claude serve <sub-subcommand> --help' for sub-subcommand flags.
-`)
-}
-
-// printServeInstallHelp prints usage for 'serve install'.
-func printServeInstallHelp() {
-	fmt.Fprint(os.Stderr, `Usage: databricks-claude serve install [flags]
-
-Register and start 'databricks-claude serve' as a per-user OS service using
-native OS primitives (launchctl on macOS, schtasks on Windows, systemctl --user
-on Linux). No sudo required — runs in the current user's session only.
-
-The binary path is resolved via os.Executable() at install time and baked into
-the manifest. After a binary upgrade, re-run 'serve install' to refresh the path.
-
-Service name: databricks-claude-daemon
-
-Flags:
-  --port int                   Proxy listen port (default: saved state > 49153)
-  --profile string             Databricks config profile
-                               (flag > saved state > MDM > "DEFAULT")
-  --log-file string            Log file path (default: per-OS default)
-  --otel-metrics-table string  UC table for OTEL metrics (flag > state > MDM > empty)
-  --otel-logs-table string     UC table for OTEL logs   (flag > state > MDM > empty)
-  --otel-traces-table string   UC table for OTEL traces (flag > state > MDM > empty)
-  --skip-auth-check            Skip the install-time auth probe. Required when
-                               running from CI / MDM init / any non-tty context
-                               where 'databricks auth login' cannot prompt.
-                               Daemon will fail to start until auth is seeded
-                               separately via 'databricks auth login --profile'.
-  --help, -h                   Show this help message
-
-Install-time auth: by default, 'serve install' verifies that the resolved
-profile has a valid Databricks token before writing any service-manager
-manifest. When stdin is a tty, an unauthenticated profile triggers the
-interactive 'databricks auth login' flow. When stdin is not a tty, the
-install aborts with an actionable error instead of writing a guaranteed-
-broken unit. Use --skip-auth-check to bypass this gate.
-
-Windows note: stdin is conservatively treated as non-interactive on this
-platform regardless of how 'serve install' was invoked (cmd.exe interactive
-sessions included), because os.ModeCharDevice semantics differ on Windows
-and the typical deployment is schtasks-driven. Run 'databricks auth login
---profile <name>' yourself before 'serve install', or pass --skip-auth-check
-to defer auth seeding until later.
-
-macOS note: if the binary is unsigned, a Gatekeeper warning is printed but
-the install proceeds. Run 'xattr -dr com.apple.quarantine <binary>' or sign
-the binary to suppress the warning.
-`)
-}
-
-// printServeUninstallHelp prints usage for 'serve uninstall'.
-func printServeUninstallHelp() {
-	fmt.Fprint(os.Stderr, `Usage: databricks-claude serve uninstall
-
-Stop and remove the 'databricks-claude-daemon' OS service registration.
-Tolerates "not installed" gracefully.
-
-Flags:
-  --help, -h   Show this help message
-`)
-}
-
-// printServeStatusHelp prints usage for 'serve status'.
-func printServeStatusHelp() {
-	fmt.Fprint(os.Stderr, `Usage: databricks-claude serve status
-
-Report the current state of the 'databricks-claude-daemon' OS service:
-  Registered — manifest/task/unit file exists
-  Running    — OS service manager reports the service as active
-  Healthy    — /health endpoint responds with daemon:true
-
-Flags:
-  --help, -h   Show this help message
-`)
-}
+// Help for `serve install`, `serve uninstall`, `serve status` is rendered
+// via cmd.Render against the corresponding tree node in serveCommand
+// (commands.go). The four hand-rolled printServeInstall*/printServeStatus*
+// /printServeUninstallHelp functions that previously lived here were
+// deleted in #171.

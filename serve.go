@@ -10,9 +10,9 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 
+	"github.com/IceRhymers/databricks-claude/internal/cmd"
 	"github.com/IceRhymers/databricks-claude/pkg/authcheck"
 	"github.com/IceRhymers/databricks-claude/pkg/mdmprofile"
 	"github.com/IceRhymers/databricks-claude/pkg/proxy"
@@ -122,54 +122,36 @@ type serveFlags struct {
 	tracesTableSet  bool
 }
 
-// parseServeFlags parses the args slice for serve-specific flags.
+// parseServeFlags maps serveCommand.Parse(args) into the typed serveFlags
+// struct that downstream resolution code consumes. The flag set is the single
+// source of truth declared on serveCommand in commands.go (#171); this
+// function is a pure projection. Tolerance for unknown flags is preserved by
+// cmd.Parse (it routes unknowns to Positional, which we discard here — same
+// behaviour as the pre-#171 hand-rolled scanner).
 func parseServeFlags(args []string) serveFlags {
+	r, _ := serveCommand.Parse(args)
 	var f serveFlags
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		next := func() string {
-			if i+1 < len(args) {
-				i++
-				return args[i]
-			}
-			return ""
-		}
-		switch {
-		case arg == "--port":
-			f.port, _ = strconv.Atoi(next())
-		case strings.HasPrefix(arg, "--port="):
-			f.port, _ = strconv.Atoi(strings.TrimPrefix(arg, "--port="))
-		case arg == "--log-file":
-			f.logFile = next()
-		case strings.HasPrefix(arg, "--log-file="):
-			f.logFile = strings.TrimPrefix(arg, "--log-file=")
-		case arg == "--verbose" || arg == "-v":
-			f.verbose = true
-		case arg == "--profile":
-			f.profile = next()
-		case strings.HasPrefix(arg, "--profile="):
-			f.profile = strings.TrimPrefix(arg, "--profile=")
-		case arg == "--otel-metrics-table":
-			f.metricsTable = next()
-			f.metricsTableSet = true
-		case strings.HasPrefix(arg, "--otel-metrics-table="):
-			f.metricsTable = strings.TrimPrefix(arg, "--otel-metrics-table=")
-			f.metricsTableSet = true
-		case arg == "--otel-logs-table":
-			f.logsTable = next()
-			f.logsTableSet = true
-		case strings.HasPrefix(arg, "--otel-logs-table="):
-			f.logsTable = strings.TrimPrefix(arg, "--otel-logs-table=")
-			f.logsTableSet = true
-		case arg == "--otel-traces-table":
-			f.tracesTable = next()
-			f.tracesTableSet = true
-		case strings.HasPrefix(arg, "--otel-traces-table="):
-			f.tracesTable = strings.TrimPrefix(arg, "--otel-traces-table=")
-			f.tracesTableSet = true
-		}
+	if v, ok := r.Strings["port"]; ok {
+		f.port, _ = strconv.Atoi(v)
 	}
+	f.logFile = r.Strings["log-file"]
+	f.verbose = r.Bools["verbose"]
+	f.profile = r.Strings["profile"]
+	f.metricsTable = r.Strings["otel-metrics-table"]
+	f.metricsTableSet = r.Set["otel-metrics-table"]
+	f.logsTable = r.Strings["otel-logs-table"]
+	f.logsTableSet = r.Set["otel-logs-table"]
+	f.tracesTable = r.Strings["otel-traces-table"]
+	f.tracesTableSet = r.Set["otel-traces-table"]
 	return f
+}
+
+// serveHelpRequested returns true when args contain --help or -h for the
+// `serve` (NOT serve install/uninstall/status) command itself. Driven off
+// the tree so its known-flag set stays consistent with completion + help.
+func serveHelpRequested(args []string) bool {
+	r, _ := serveCommand.Parse(args)
+	return r.Bools["help"]
 }
 
 // resolveTableFromChain resolves one OTEL table following flag → state → MDM → empty.
@@ -245,8 +227,8 @@ func runServe(args []string) {
 	// that writes to stdout doesn't corrupt the LaunchAgent stdout log.
 	os.Stdout = os.Stderr
 
-	if hasFlag(args, "--help") || hasFlag(args, "-h") {
-		printServeHelp()
+	if serveHelpRequested(args) {
+		_ = cmd.Render(os.Stderr, serveCommand, nil)
 		os.Exit(0)
 	}
 
@@ -408,105 +390,9 @@ func runServe(args []string) {
 	ln.Close()
 }
 
-// printServeHelp prints usage for the `serve` subcommand to stderr.
-func printServeHelp() {
-	fmt.Fprint(os.Stderr, `Usage: databricks-claude serve [flags]
-       databricks-claude serve <install|uninstall|status> [flags]
-
-Long-lived daemon that serves Claude Code and Claude Desktop with persistent
-Databricks OAuth. A third deployment mode alongside the per-session CLI wrapper
-(databricks-claude claude ...) and SessionStart hooks — useful when you want a
-single OAuth-refreshing proxy that survives across sessions.
-
-Owns Databricks OAuth refresh and exposes inference + OTLP on 127.0.0.1.
-Distinguished from --headless mode by: no session refcount, no /shutdown
-route, append-only logging, and daemon:true in /health so hooks can detect
-and no-op.
-
-Designed for LaunchAgent or systemd service deployment, where a plist or
-unit file invokes 'databricks-claude serve' once and keeps it running.
-Configure your client to point at the daemon:
-  Claude Desktop: via MDM, set gatewayBaseUrl: http://127.0.0.1:<port>.
-  Claude Code:    edit ~/.claude/settings.json once to set
-                  ANTHROPIC_BASE_URL=http://127.0.0.1:<port> in the env block.
-The daemon does NOT mutate settings.json itself — it stays outside the
-per-tool lifecycle by design.
-
-Sub-subcommands (OS service management):
-  install    Register and start the daemon as a per-user OS service.
-             Uses: launchctl (macOS), schtasks (Windows), systemctl --user (Linux).
-             Run 'databricks-claude serve install --help' for flags.
-  uninstall  Stop and remove the daemon OS service registration.
-             Run 'databricks-claude serve uninstall --help' for flags.
-  status     Report Registered / Running / Healthy in one shot.
-             Run 'databricks-claude serve status --help' for flags.
-
-Flags (for the daemon itself, not sub-subcommands):
-  --port int                   Proxy listen port (default: 49153). The daemon
-                               binds this port exclusively — MDM-baked
-                               gatewayBaseUrl is a fixed URL and cannot follow
-                               a fallback port.
-  --profile string             Databricks config profile (default: saved
-                               state > MDM databricksProfile key > "DEFAULT")
-  --log-file string            Append to this file instead of discarding logs.
-                               Safe for log rotation (O_APPEND). Restarts
-                               preserve prior content (not O_TRUNC).
-  --verbose, -v                Also write debug logs to stderr (combinable
-                               with --log-file)
-  --otel-metrics-table string  Unity Catalog table for OTEL metrics
-                               (cat.schema.table). Resolution: flag > saved
-                               state > MDM otelMetricsTable key > empty.
-                               Empty = no X-Databricks-UC-Table-Name header;
-                               Databricks ingest rejects the request (visible,
-                               actionable failure — not silent).
-  --otel-logs-table string     Unity Catalog table for OTEL logs (same chain)
-  --otel-traces-table string   Unity Catalog table for OTEL traces (same chain)
-  --help, -h                   Show this help message
-
-MDM keys (domain: com.icerhymers.databricks-claude):
-  databricksProfile   Databricks CLI profile name
-  otelMetricsTable    UC table for OTEL metrics
-  otelLogsTable       UC table for OTEL logs
-  otelTracesTable     UC table for OTEL traces
-
-Note: --otel / --no-otel* flags are NOT supported for serve. Those flags
-mutate ~/.claude/settings.json to configure Claude Code's OTLP emission.
-In daemon mode, Claude Desktop reads OTLP config from MDM, not from any
-wrapper-mutated file. Omit otlpEndpoint from the MDM profile to disable OTLP.
-
-Endpoints:
-  GET /health   Returns {"tool":"databricks-claude","daemon":true,"version":"...",
-                         "profile":"...","token_valid_until":"..."}
-  POST /shutdown  Not registered — returns 404. Stop the daemon via SIGTERM
-                  (e.g. launchctl stop or systemctl stop).
-
-Examples:
-  # Minimal daemon on default port:
-  databricks-claude serve
-
-  # Register as an OS service and start:
-  databricks-claude serve install
-  databricks-claude serve install --profile databricks-ai-inference --port 49153
-
-  # Check service status:
-  databricks-claude serve status
-
-  # Remove OS service registration:
-  databricks-claude serve uninstall
-
-  # With explicit profile, port, and log file:
-  databricks-claude serve \
-    --profile databricks-ai-inference \
-    --port 49153 \
-    --log-file /var/log/databricks-claude/daemon.log
-
-  # With OTEL table routing:
-  databricks-claude serve \
-    --otel-metrics-table main.claude_telemetry.claude_otel_metrics \
-    --otel-logs-table main.claude_telemetry.claude_otel_logs
-
-Exit codes:
-  0   Clean shutdown on SIGINT/SIGTERM
-  1   Startup failure (auth, port collision, host discovery)
-`)
-}
+// Help for `serve`, `serve install`, `serve uninstall`, `serve status` is
+// rendered via cmd.Render against the corresponding tree node (see
+// serveCommand and its Subcommands in commands.go). The seven hand-rolled
+// printXxxHelp functions that previously lived here, in serve_install.go,
+// in setup.go, and in desktop_config.go were deleted in #171; the tree is
+// now the single source of truth for both flag-parsing AND help text.
