@@ -1044,8 +1044,8 @@ func TestDaemonModeKeys_Coverage(t *testing.T) {
 
 func TestDaemonModeKeys_WithOTEL(t *testing.T) {
 	k := daemonModeKeys(49153, "key", true)
-	if k.OTELEndpoint != "http://127.0.0.1:49153" {
-		t.Errorf("OTELEndpoint = %q, want http://127.0.0.1:49153", k.OTELEndpoint)
+	if k.OTELEndpoint != "http://127.0.0.1:49153/otel" {
+		t.Errorf("OTELEndpoint = %q, want http://127.0.0.1:49153/otel", k.OTELEndpoint)
 	}
 	if k.OTELProtocol != "http/protobuf" {
 		t.Errorf("OTELProtocol = %q, want http/protobuf", k.OTELProtocol)
@@ -1170,8 +1170,8 @@ func TestBuildDaemonMode_WithOTEL_Mobileconfig(t *testing.T) {
 	if !strings.Contains(out, `<key>otlpEndpoint</key>`) {
 		t.Errorf("otel mobileconfig missing otlpEndpoint")
 	}
-	if !strings.Contains(out, `<string>http://127.0.0.1:49153</string>`) {
-		t.Errorf("otel mobileconfig missing localhost endpoint")
+	if !strings.Contains(out, `<string>http://127.0.0.1:49153/otel</string>`) {
+		t.Errorf("otel mobileconfig missing localhost /otel endpoint")
 	}
 	if !strings.Contains(out, `<key>otlpProtocol</key>`) {
 		t.Errorf("otel mobileconfig missing otlpProtocol")
@@ -1184,7 +1184,7 @@ func TestBuildDaemonMode_WithOTEL_Mobileconfig(t *testing.T) {
 func TestBuildDaemonMode_WithOTEL_RegFile(t *testing.T) {
 	keys := daemonModeKeys(49153, "key", true)
 	out := buildRegFile(keys, "p", "", 49153)
-	if !strings.Contains(out, `"otlpEndpoint"="http://127.0.0.1:49153"`) {
+	if !strings.Contains(out, `"otlpEndpoint"="http://127.0.0.1:49153/otel"`) {
 		t.Errorf("otel .reg missing otlpEndpoint; got:\n%s", out)
 	}
 	if !strings.Contains(out, `"otlpProtocol"="http/protobuf"`) {
@@ -1202,7 +1202,7 @@ func TestBuildDaemonMode_WithOTEL_JSON(t *testing.T) {
 	if err := json.Unmarshal(out, &m); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if m["otlpEndpoint"] != "http://127.0.0.1:49153" {
+	if m["otlpEndpoint"] != "http://127.0.0.1:49153/otel" {
 		t.Errorf("otlpEndpoint = %v", m["otlpEndpoint"])
 	}
 	if m["otlpProtocol"] != "http/protobuf" {

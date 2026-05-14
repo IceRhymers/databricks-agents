@@ -48,7 +48,7 @@ type modeKeys struct {
 	GatewayAPIKey  string // daemon-mode only; "" → omit
 	CredHelper     string // helper-mode only; "" → signals daemon-mode
 	CredHelperTTL  int    // helper-mode: 55; daemon-mode: 0 → omit
-	OTELEndpoint   string // daemon+otel only; "" → omit
+	OTELEndpoint   string // daemon+otel only; "" → omit. Base URL incl. /otel path prefix.
 	OTELProtocol   string // daemon+otel only; "" → omit
 }
 
@@ -65,13 +65,19 @@ func helperModeKeys(gatewayURL, helperPath string) modeKeys {
 
 // daemonModeKeys returns the inference key set for daemon-mode (--daemon opt-in).
 // withOTEL adds OTLP endpoint/protocol keys pointing at the same localhost port.
+//
+// The OTLP endpoint carries the /otel path prefix: Claude Desktop's Cowork
+// exporter treats otlpEndpoint as a base URL and appends /v1/metrics,
+// /v1/logs, /v1/traces itself. The daemon's OTEL proxy route is mounted at
+// /otel/ (the bare / route is the inference catch-all), so without the
+// prefix every signal would land on the inference handler and be dropped.
 func daemonModeKeys(port int, fakeKey string, withOTEL bool) modeKeys {
 	k := modeKeys{
 		GatewayBaseURL: fmt.Sprintf("http://127.0.0.1:%d", port),
 		GatewayAPIKey:  fakeKey,
 	}
 	if withOTEL {
-		k.OTELEndpoint = fmt.Sprintf("http://127.0.0.1:%d", port)
+		k.OTELEndpoint = fmt.Sprintf("http://127.0.0.1:%d/otel", port)
 		k.OTELProtocol = "http/protobuf"
 	}
 	return k
