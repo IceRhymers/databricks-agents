@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/IceRhymers/databricks-claude/internal/cmd"
 	"github.com/IceRhymers/databricks-claude/pkg/authcheck"
 	"github.com/IceRhymers/databricks-claude/pkg/cli"
 	"github.com/IceRhymers/databricks-claude/pkg/mdmprofile"
@@ -145,114 +146,67 @@ func isCredentialHelperBinaryName(arg0 string) bool {
 
 // runDesktopCommand handles the `databricks-claude desktop ...` subcommand.
 // args is everything after the literal "desktop" token in os.Args.
+//
+// Flag parsing now goes through desktopCommand.Parse (#171). Action keywords
+// (generate-config / credential-helper / generate-trust-profile) appear in
+// ParseResult.Positional so we can dispatch on them while still reading every
+// declared flag from the same parse pass — no second walk over args.
 func runDesktopCommand(args []string) {
 	if len(args) == 0 {
-		printDesktopHelp()
+		_ = cmd.Render(os.Stderr, desktopCommand, nil)
 		os.Exit(2)
 	}
-	switch args[0] {
-	case "-h", "--help":
-		printDesktopHelp()
+	r, _ := desktopCommand.Parse(args)
+	if r.Bools["help"] {
+		_ = cmd.Render(os.Stderr, desktopCommand, nil)
 		os.Exit(0)
+	}
+	if len(r.Positional) == 0 {
+		_ = cmd.Render(os.Stderr, desktopCommand, nil)
+		os.Exit(2)
+	}
+	action := r.Positional[0]
+	switch action {
 	case "generate-config":
-		forPkg, _ := extractForPkgFlag(args[1:])
-		daemon := extractDaemonFlag(args[1:])
-		port := extractDesktopPortFlag(args[1:])
-		fakeKey := extractDaemonFakeKeyFlag(args[1:])
-		withOTEL := hasFlag(args[1:], "--otel")
 		runGenerateDesktopConfig(
-			extractProfileFlag(args[1:]),
-			extractOutputFlag(args[1:]),
-			extractBinaryPathFlag(args[1:]),
-			extractDatabricksCLIPathFlag(args[1:]),
-			forPkg, daemon, port, fakeKey, withOTEL,
+			r.Strings["profile"],
+			r.Strings["output"],
+			r.Strings["binary-path"],
+			r.Strings["databricks-cli-path"],
+			r.Bools["for-pkg"],
+			r.Bools["daemon"],
+			parseIntOrZero(r.Strings["port"]),
+			r.Strings["daemon-fake-key"],
+			r.Bools["otel"],
 		)
 	case "credential-helper":
-		runCredentialHelper(extractProfileFlag(args[1:]))
+		runCredentialHelper(r.Strings["profile"])
 	case "generate-trust-profile":
+		// runGenerateTrustProfile pulls --cert and --output via its own
+		// extractCertFlag + extractOutputFlag scanners. Pass it the args
+		// AFTER the action keyword (matching the legacy call shape) so its
+		// scanners see the flags but not the action token.
 		if err := runGenerateTrustProfile(args[1:]); err != nil {
 			fmt.Fprintf(os.Stderr, "databricks-claude: %v\n", err)
 			os.Exit(1)
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "databricks-claude: unknown desktop action %q\n\n", args[0])
-		printDesktopHelp()
+		fmt.Fprintf(os.Stderr, "databricks-claude: unknown desktop action %q\n\n", action)
+		_ = cmd.Render(os.Stderr, desktopCommand, nil)
 		os.Exit(1)
 	}
 }
 
-func printDesktopHelp() {
-	fmt.Fprint(os.Stderr, `Usage: databricks-claude desktop <action> [flags]
-
-Set up Claude Desktop's third-party-inference integration with Databricks.
-
-Actions:
-  generate-config     Write Claude Desktop configuration artifacts. Without
-                      --output, writes three files into the current directory.
-                      All three encode the same Databricks gateway and
-                      credential-helper defaults:
-                        databricks-claude-desktop.mobileconfig (install on macOS)
-                        databricks-claude-desktop.reg          (install on Windows)
-                        databricks-claude-desktop.json         (editable source —
-                                                                import into Claude
-                                                                Desktop developer
-                                                                mode to customize
-                                                                further, then
-                                                                re-export for MDM)
-  credential-helper   Print a fresh Databricks token to stdout — the same code
-                      path Claude Desktop's inferenceCredentialHelper invokes
-                      via the databricks-claude-credential-helper symlink.
-                      Useful for scripting and debug.
-  generate-trust-profile
-                      Emit a Configuration Profile (.mobileconfig) that
-                      establishes the .pkg signing certificate as a trusted
-                      root for code-signing on managed Macs. Pair with the
-                      signed .pkg in your MDM rollout so Gatekeeper accepts
-                      the installer without per-device prompts.
-
-Flags:
-  --profile string              Databricks CLI profile (default: state file > DEFAULT)
-  --output string               Single output path for generate-config; format
-                                inferred from .mobileconfig/.reg/.json extension
-                                or host OS. Also the output path for
-                                generate-trust-profile (default:
-                                dist/databricks-claude-trust.mobileconfig).
-  --binary-path string          generate-config: credential-helper path embedded in
-                                the generated config (default: derived from the
-                                running binary). Use this for MDM rollouts so one
-                                config works on every endpoint.
-  --databricks-cli-path string  generate-config: pin the absolute path of the
-                                'databricks' CLI used by the credential helper.
-                                Persisted to ~/.claude/.databricks-claude.json.
-  --cert string                 generate-trust-profile: path to a PEM-encoded
-                                x509 certificate (the .pkg signing cert) to
-                                wrap as a trusted root.
-  --daemon                      generate-config: emit daemon-mode artifacts pointing
-                                at a local 'databricks-claude serve' daemon instead
-                                of the Databricks AI Gateway. Default: helper-mode.
-  --port int                    generate-config --daemon: daemon port for
-                                gatewayBaseUrl (default: state file > 49153).
-  --daemon-fake-key string      generate-config --daemon: static API key embedded
-                                in artifacts (localhost gate, not a real credential).
-                                Default: built-in constant with a banner warning.
-
-Examples:
-  # First-time setup on your Mac.
-  databricks-claude desktop generate-config --profile myws
-
-  # MDM rollout — bake fleet-wide paths into one config.
-  databricks-claude desktop generate-config --profile myws \
-    --binary-path /usr/local/bin/databricks-claude-credential-helper \
-    --databricks-cli-path /usr/local/bin/databricks
-
-  # Print a token directly (debug; equivalent to invoking the helper symlink).
-  databricks-claude desktop credential-helper --profile myws
-
-  # Emit a code-signing trust profile for MDM (pairs with a signed .pkg).
-  databricks-claude desktop generate-trust-profile \
-    --cert ./codesign-cert.pem \
-    --output dist/databricks-claude-trust.mobileconfig
-`)
+// parseIntOrZero turns the string form of a numeric flag value into an int,
+// returning 0 on parse failure or empty input. Mirrors the historical
+// "extractDesktopPortFlag returns 0 when missing or unparseable" semantics
+// without reintroducing a bespoke scanner.
+func parseIntOrZero(s string) int {
+	if s == "" {
+		return 0
+	}
+	n, _ := strconv.Atoi(s)
+	return n
 }
 
 // mdmReader is the MDM profile-reader function. Overridable in tests so the
@@ -1133,84 +1087,58 @@ func regEscape(s string) string {
 	return r.Replace(s)
 }
 
-// extractProfileFlag scans args for --profile/--profile=value and returns the
-// profile string if present. Used by the early-exit credential-helper and
-// generate-desktop-config paths so they don't have to wait for parseArgs.
+// The extract*Flag helpers below are tree-driven thin wrappers post-#171.
+// Each calls desktopCommand.Parse(args) and projects out one specific flag.
+// runDesktopCommand itself no longer uses any of them — it walks ParseResult
+// directly. They survive because:
+//
+//   - extractProfileFlag is the credential-helper alias path's profile reader
+//     (main.go:136 — argv[0] aliasing means the desktop dispatcher never runs).
+//   - extractOutputFlag is the trust-profile generator's output reader
+//     (desktop_trust.go).
+//   - The remaining helpers are exercised by desktop_config_test.go's
+//     parsing tests; routing them through cmd.Parse keeps test coverage on
+//     the new path and forces any future regression in cmd.Parse to surface
+//     here too.
+
+// extractProfileFlag returns the value of --profile in args, or "" when
+// absent. Used by the credential-helper argv[0]-alias path before any
+// subcommand dispatch happens.
 func extractProfileFlag(args []string) string {
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--profile" && i+1 < len(args) {
-			return args[i+1]
-		}
-		if strings.HasPrefix(a, "--profile=") {
-			return strings.TrimPrefix(a, "--profile=")
-		}
-	}
-	return ""
+	r, _ := desktopCommand.Parse(args)
+	return r.Strings["profile"]
 }
 
-// extractOutputFlag is the analogous helper for --output / --output=value.
+// extractOutputFlag returns the value of --output in args, or "".
 func extractOutputFlag(args []string) string {
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--output" && i+1 < len(args) {
-			return args[i+1]
-		}
-		if strings.HasPrefix(a, "--output=") {
-			return strings.TrimPrefix(a, "--output=")
-		}
-	}
-	return ""
+	r, _ := desktopCommand.Parse(args)
+	return r.Strings["output"]
 }
 
-// extractBinaryPathFlag is the analogous helper for --binary-path. Used by
-// MDM admins to override the credential-helper path embedded in the generated
-// Claude Desktop config.
+// extractBinaryPathFlag returns the value of --binary-path in args, or "".
 func extractBinaryPathFlag(args []string) string {
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--binary-path" && i+1 < len(args) {
-			return args[i+1]
-		}
-		if strings.HasPrefix(a, "--binary-path=") {
-			return strings.TrimPrefix(a, "--binary-path=")
-		}
-	}
-	return ""
+	r, _ := desktopCommand.Parse(args)
+	return r.Strings["binary-path"]
 }
 
-// extractDatabricksCLIPathFlag is the analogous helper for --databricks-cli-path.
-// Pins the absolute path to the `databricks` binary that the credential
-// helper subprocess will exec. Persisted to the state file so the helper —
-// which can't receive flags — picks it up on each invocation.
+// extractDatabricksCLIPathFlag returns the value of --databricks-cli-path in
+// args, or "".
 func extractDatabricksCLIPathFlag(args []string) string {
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--databricks-cli-path" && i+1 < len(args) {
-			return args[i+1]
-		}
-		if strings.HasPrefix(a, "--databricks-cli-path=") {
-			return strings.TrimPrefix(a, "--databricks-cli-path=")
-		}
-	}
-	return ""
+	r, _ := desktopCommand.Parse(args)
+	return r.Strings["databricks-cli-path"]
 }
 
-// extractForPkgFlag scans args for the boolean --for-pkg flag. Mirrors the
-// other extract* helpers in shape but is presence-only: --for-pkg toggles
-// forPkg=true, --for-pkg=true / --for-pkg=false honour the explicit value.
-// Returns the parsed value plus a copy of args with the flag removed.
+// extractForPkgFlag returns whether --for-pkg was set, plus a copy of args
+// with the flag removed. The "remaining" return matches the historical
+// signature: callers feed the trimmed slice into other scanners that would
+// otherwise try to interpret the flag themselves.
 func extractForPkgFlag(args []string) (forPkg bool, remaining []string) {
+	r, _ := desktopCommand.Parse(args)
+	forPkg = r.Bools["for-pkg"]
 	remaining = make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if a == "--for-pkg" {
-			forPkg = true
-			continue
-		}
-		if strings.HasPrefix(a, "--for-pkg=") {
-			v := strings.TrimPrefix(a, "--for-pkg=")
-			forPkg = v == "true" || v == "1" || v == ""
+		if a == "--for-pkg" || strings.HasPrefix(a, "--for-pkg=") {
 			continue
 		}
 		remaining = append(remaining, a)
@@ -1218,56 +1146,35 @@ func extractForPkgFlag(args []string) (forPkg bool, remaining []string) {
 	return forPkg, remaining
 }
 
-// extractDaemonFlag scans args for the boolean --daemon flag.
-// Returns true if present. Same pattern as extractForPkgFlag but simpler
-// (no explicit =false form needed for daemon-mode; absence means helper-mode).
+// extractDaemonFlag returns whether --daemon was set (truthy).
 func extractDaemonFlag(args []string) bool {
-	for _, a := range args {
-		if a == "--daemon" {
-			return true
-		}
-		if strings.HasPrefix(a, "--daemon=") {
-			v := strings.TrimPrefix(a, "--daemon=")
-			return v == "true" || v == "1" || v == ""
-		}
-	}
-	return false
+	r, _ := desktopCommand.Parse(args)
+	return r.Bools["daemon"]
 }
 
-// extractDesktopPortFlag scans args for --port / --port=N specifically for
-// the desktop generate-config subcommand. Returns 0 if not present (the caller
-// resolves the default from state or the package constant).
+// extractDesktopPortFlag returns the integer value of --port, or 0 if
+// missing or unparseable. Caller resolves the default from state or the
+// package constant.
 func extractDesktopPortFlag(args []string) int {
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--port" && i+1 < len(args) {
-			v, _ := strconv.Atoi(args[i+1])
-			return v
-		}
-		if strings.HasPrefix(a, "--port=") {
-			v, _ := strconv.Atoi(strings.TrimPrefix(a, "--port="))
-			return v
-		}
+	r, _ := desktopCommand.Parse(args)
+	if v, ok := r.Strings["port"]; ok {
+		n, _ := strconv.Atoi(v)
+		return n
 	}
 	return 0
 }
 
-// extractDaemonFakeKeyFlag scans args for --daemon-fake-key / --daemon-fake-key=value.
+// extractDaemonFakeKeyFlag returns the value of --daemon-fake-key in args,
+// or "".
 func extractDaemonFakeKeyFlag(args []string) string {
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--daemon-fake-key" && i+1 < len(args) {
-			return args[i+1]
-		}
-		if strings.HasPrefix(a, "--daemon-fake-key=") {
-			return strings.TrimPrefix(a, "--daemon-fake-key=")
-		}
-	}
-	return ""
+	r, _ := desktopCommand.Parse(args)
+	return r.Strings["daemon-fake-key"]
 }
 
 // hasFlag returns true if any element of args equals name (or starts with
-// name+"="). Used for early-exit flag detection at the top of main().
+// name+"="). Retained because desktop_config_test.go's TestHasFlag drives it
+// directly; production-code callers were migrated to ParseResult.Bools in
+// #171.
 func hasFlag(args []string, name string) bool {
 	for _, a := range args {
 		if a == name || strings.HasPrefix(a, name+"=") {

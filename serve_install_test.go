@@ -13,7 +13,20 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/IceRhymers/databricks-claude/internal/cmd"
 )
+
+// renderHelpToString returns a closure that renders c's help via cmd.Render
+// into a fresh string each call. Helper for tests that previously captured
+// stderr from the deleted printServeXxxHelp functions.
+func renderHelpToString(c cmd.Command) func() string {
+	return func() string {
+		var buf bytes.Buffer
+		_ = cmd.Render(&buf, c, nil)
+		return buf.String()
+	}
+}
 
 // TestParseInstallFlags verifies that parseInstallFlags correctly parses
 // install sub-subcommand flags.
@@ -264,36 +277,31 @@ func TestBinaryPathNoWarningWhenEmpty(t *testing.T) {
 	}
 }
 
-// TestServeInstallHelpFlag verifies that --help args return the correct help
-// function output (by checking the output contains the expected subcommand names).
+// TestServeInstallHelpContent verifies that the help body for each serve
+// sub-subcommand contains its expected sentinel strings. Post-#171 the help
+// text lives in cmd.Render against the tree node, so this test renders each
+// node directly. The `install` ⇒ `install` and similar pairs assert that
+// rendering serveCommand reaches the parent help body — i.e. the parent's
+// "Sub-subcommands" section that lists install/uninstall/status by name.
 func TestServeInstallHelpContent(t *testing.T) {
 	tests := []struct {
-		fn       func()
+		render   func() string
 		contains string
 	}{
-		{printServeInstallRootHelp, "install"},
-		{printServeInstallRootHelp, "uninstall"},
-		{printServeInstallRootHelp, "status"},
-		{printServeInstallHelp, "--port"},
-		{printServeInstallHelp, "--profile"},
-		{printServeInstallHelp, "databricks-claude-daemon"},
-		{printServeUninstallHelp, "uninstall"},
-		{printServeStatusHelp, "Registered"},
-		{printServeStatusHelp, "Running"},
-		{printServeStatusHelp, "Healthy"},
+		{renderHelpToString(serveCommand), "install"},
+		{renderHelpToString(serveCommand), "uninstall"},
+		{renderHelpToString(serveCommand), "status"},
+		{renderHelpToString(installCommand()), "--port"},
+		{renderHelpToString(installCommand()), "--profile"},
+		{renderHelpToString(installCommand()), "databricks-claude-daemon"},
+		{renderHelpToString(uninstallCommand()), "uninstall"},
+		{renderHelpToString(statusCommand()), "Registered"},
+		{renderHelpToString(statusCommand()), "Running"},
+		{renderHelpToString(statusCommand()), "Healthy"},
 	}
 
 	for _, tc := range tests {
-		// Help prints to stderr, capture it.
-		r, w, _ := os.Pipe()
-		old := os.Stderr
-		os.Stderr = w
-		tc.fn()
-		w.Close()
-		os.Stderr = old
-		var buf bytes.Buffer
-		buf.ReadFrom(r)
-		out := buf.String()
+		out := tc.render()
 		if !strings.Contains(out, tc.contains) {
 			t.Errorf("help output missing %q\nfull output:\n%s", tc.contains, out)
 		}

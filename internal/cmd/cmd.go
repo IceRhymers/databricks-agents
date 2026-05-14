@@ -126,6 +126,19 @@ type Command struct {
 	Run func(args []string) error
 }
 
+// Subcommand returns a pointer to the immediate child Command with the given
+// name, or nil when no such child exists. Helper for runners that dispatch
+// nested subcommands (e.g. `serve install` finding the install node under
+// the serve node) without re-walking the slice each time.
+func (c Command) Subcommand(name string) *Command {
+	for i := range c.Subcommands {
+		if c.Subcommands[i].Name == name {
+			return &c.Subcommands[i]
+		}
+	}
+	return nil
+}
+
 // AllFlags returns Persistent followed by Flags as a single ordered slice.
 // Persistent comes first so subcommand parsing (when it migrates) sees
 // inherited flags before its own; the help renderer follows the same
@@ -149,13 +162,19 @@ func (c Command) CompletionFlags() []completion.FlagDef {
 }
 
 // CompletionSubcommands returns the immediate children as
-// pkg/completion.SubcommandDef so they appear at position 1 in shells.
+// pkg/completion.SubcommandDef. The conversion is RECURSIVE: each child
+// carries its own Flags and Subcommands so the shell-completion generator
+// can offer nested completion (e.g. `serve install --<TAB>` →
+// install-scoped flags). Flags include each child's Persistent ++ Flags so
+// inherited flags surface alongside the child's own.
 func (c Command) CompletionSubcommands() []completion.SubcommandDef {
 	out := make([]completion.SubcommandDef, len(c.Subcommands))
 	for i, s := range c.Subcommands {
 		out[i] = completion.SubcommandDef{
 			Name:        s.Name,
 			Description: s.Short,
+			Flags:       s.CompletionFlags(),
+			Subcommands: s.CompletionSubcommands(),
 		}
 	}
 	return out
@@ -192,6 +211,144 @@ func Render(w io.Writer, c Command, vars map[string]string) error {
 		return err
 	}
 	return renderProgrammatic(w, c)
+}
+
+// ParseResult is the generic output of Command.Parse. Runners map this into
+// their own typed flag struct (e.g. serveFlags, installFlags) so downstream
+// resolution code is untouched. Three maps so callers can answer the three
+// questions runners actually ask:
+//
+//   - "what string did the user provide for --flag?"     → Strings
+//   - "did the user pass --flag (boolean toggle)?"        → Bools
+//   - "did the user provide --flag at all (used to gate
+//     state-persistence writes via the sentinel guard)?"  → Set
+//
+// Strings and Bools are populated only for known flags (declared on the
+// Command's Persistent + Flags). Unknown flags AND any leftover positional
+// tokens are appended to Positional in input order so runners can still
+// detect e.g. an action keyword like `desktop generate-config` or, for the
+// root, forward unknowns to the wrapped claude binary.
+type ParseResult struct {
+	Strings    map[string]string
+	Bools      map[string]bool
+	Set        map[string]bool
+	Positional []string
+}
+
+// Parse evaluates args against c's known flags (Persistent ++ Flags) and
+// returns a ParseResult. Behavior mirrors the hand-rolled scanners that
+// previously lived in serve.go / serve_install.go / setup.go /
+// desktop_config.go:
+//
+//   - Supports --flag value AND --flag=value forms.
+//   - Boolean flags (TakesArg=false) consume no value. An explicit
+//     --flag=false / --flag=0 / --flag=no sets the bool to false; anything
+//     else (including bare --flag) sets it to true.
+//   - Bare "--" terminates flag parsing; everything after is appended to
+//     Positional verbatim.
+//   - Short aliases declared via FlagDef.Short are honoured (-v → --verbose,
+//     -h → --help when those flags are declared on c).
+//   - Unknown long flags and unknown short flags are appended to Positional
+//     unchanged. This preserves the historical tolerance of the hand-rolled
+//     scanners (which silently ignored unknown flags) and lets root callers
+//     forward unknowns to claude.
+//   - A TakesArg flag that appears without a value (last token, no "=") gets
+//     an empty string in Strings — matches parseServeFlags / parseInstallFlags
+//     behaviour where bare `--port` left port=0 rather than erroring.
+func (c Command) Parse(args []string) (*ParseResult, error) {
+	flagsByName := make(map[string]FlagDef)
+	flagsByShort := make(map[string]FlagDef)
+	for _, f := range c.AllFlags() {
+		flagsByName[f.Name] = f
+		if f.Short != "" {
+			flagsByShort[f.Short] = f
+		}
+	}
+
+	res := &ParseResult{
+		Strings: map[string]string{},
+		Bools:   map[string]bool{},
+		Set:     map[string]bool{},
+	}
+
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+
+		if a == "--" {
+			res.Positional = append(res.Positional, args[i+1:]...)
+			break
+		}
+
+		if strings.HasPrefix(a, "--") {
+			name := a[2:]
+			value := ""
+			hasValue := false
+			if eq := strings.Index(name, "="); eq >= 0 {
+				value = name[eq+1:]
+				name = name[:eq]
+				hasValue = true
+			}
+			f, known := flagsByName[name]
+			if !known {
+				res.Positional = append(res.Positional, a)
+				continue
+			}
+			if f.TakesArg {
+				if !hasValue && i+1 < len(args) {
+					i++
+					value = args[i]
+				}
+				res.Strings[name] = value
+				res.Set[name] = true
+			} else {
+				res.Bools[name] = !isFalsy(hasValue, value)
+				res.Set[name] = true
+			}
+			continue
+		}
+
+		if len(a) > 1 && a[0] == '-' {
+			short := a[1:]
+			value := ""
+			hasValue := false
+			if eq := strings.Index(short, "="); eq >= 0 {
+				value = short[eq+1:]
+				short = short[:eq]
+				hasValue = true
+			}
+			f, known := flagsByShort[short]
+			if !known {
+				res.Positional = append(res.Positional, a)
+				continue
+			}
+			if f.TakesArg {
+				if !hasValue && i+1 < len(args) {
+					i++
+					value = args[i]
+				}
+				res.Strings[f.Name] = value
+				res.Set[f.Name] = true
+			} else {
+				res.Bools[f.Name] = !isFalsy(hasValue, value)
+				res.Set[f.Name] = true
+			}
+			continue
+		}
+
+		res.Positional = append(res.Positional, a)
+	}
+
+	return res, nil
+}
+
+// isFalsy reports whether an explicit boolean-flag value should set the bool
+// to false. Bare flag (hasValue=false) is always truthy. Explicit values
+// "0", "false", "no" (case-insensitive) are falsy; everything else is truthy.
+func isFalsy(hasValue bool, value string) bool {
+	if !hasValue {
+		return false
+	}
+	return value == "0" || strings.EqualFold(value, "false") || strings.EqualFold(value, "no")
 }
 
 // renderProgrammatic emits a default help layout for commands that don't
