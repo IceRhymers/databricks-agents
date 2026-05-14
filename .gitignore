@@ -6,6 +6,9 @@ dist/
 *.mobileconfig
 *.reg
 databricks-claude-desktop.json
+# testdata golden files are intentionally tracked despite the *.mobileconfig / *.reg patterns above
+!testdata/**/*.mobileconfig
+!testdata/**/*.reg
 build/
 root/
 scripts/postinstall

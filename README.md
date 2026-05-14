@@ -209,6 +209,17 @@ The packaging method (`.pkg` installer, custom `brew` formula, etc.) is responsi
 
 For fleet rollout via MDM using the signed `.pkg` installer, see [MDM deployment with signed `.pkg`](#mdm-deployment-with-signed-pkg-self-signed) below.
 
+### Daemon-mode (advanced)
+
+Pass `--daemon` to emit artifacts pointing Claude Desktop at a local `databricks-claude serve` daemon instead of the Databricks AI Gateway directly. Daemon-mode unlocks OTLP forwarding from Desktop (helper-mode cannot, as Anthropic ships no `otlpCredentialHelper`). Requires `databricks-claude serve install` on each endpoint. A full rollout guide is forthcoming — see #165. Helper-mode (no flag) remains the default and recommended path for most deployments.
+
+```bash
+databricks-claude desktop generate-config --daemon \
+  --profile myws \
+  --port 49153 \
+  --daemon-fake-key my-fleet-key
+```
+
 #### Fleet rollout — per-user init script
 
 After your MDM policy deploys `databricks-claude.pkg` and the workspace `.mobileconfig`, run this user-scope init script (e.g. as a Jamf policy or Intune Win32 app triggered at login):
