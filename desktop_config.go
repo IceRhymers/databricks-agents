@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,69 @@ import (
 	"github.com/IceRhymers/databricks-claude/pkg/cli"
 	"github.com/IceRhymers/databricks-claude/pkg/mdmprofile"
 )
+
+// uuidGenerator is the UUID factory used by buildMobileconfig. Overridable in
+// tests to produce deterministic output for golden-file comparison.
+var uuidGenerator = newUUID
+
+// daemonFakeKeyDefault is the fleet-shared static fake gateway key used in
+// daemon-mode when --daemon-fake-key is not set. The daemon validates the
+// proxy connection via localhost IP binding, not a real credential.
+// This value is intentionally public — it is a localhost gate, not a secret.
+const daemonFakeKeyDefault = "databricks-claude-daemon-localhost-key"
+
+// daemonFakeKeyWarning is printed to stderr when --daemon is set but
+// --daemon-fake-key is not, alerting the admin that the default constant is in use.
+const daemonFakeKeyWarning = `databricks-claude: WARNING: --daemon-fake-key not set, using default fleet-shared constant.
+  The fake key is a localhost gate, not a real credential — Claude Desktop just needs
+  ANY non-empty value to satisfy its gatewayApiKey schema. For fleet rollouts you may
+  want to set a custom value via --daemon-fake-key so per-fleet artifacts differ.
+`
+
+// modeKeys holds the inference-provider key set for one deployment mode.
+// Construct via helperModeKeys or daemonModeKeys — never fill directly.
+// All three artifact builders (buildMobileconfig, buildRegFile,
+// buildDevModeJSON) consume this struct as their single source of truth,
+// so adding or removing a key here propagates automatically to every format.
+type modeKeys struct {
+	GatewayBaseURL string // mandatory in both modes
+	GatewayAPIKey  string // daemon-mode only; "" → omit
+	CredHelper     string // helper-mode only; "" → signals daemon-mode
+	CredHelperTTL  int    // helper-mode: 55; daemon-mode: 0 → omit
+	OTELEndpoint   string // daemon+otel only; "" → omit. Base URL incl. /otel path prefix.
+	OTELProtocol   string // daemon+otel only; "" → omit
+}
+
+// helperModeKeys returns the inference key set for helper-mode (the default).
+// Changing this function changes ALL three artifact formats simultaneously,
+// which is the point: it is the single source of truth for helper-mode output.
+func helperModeKeys(gatewayURL, helperPath string) modeKeys {
+	return modeKeys{
+		GatewayBaseURL: gatewayURL,
+		CredHelper:     helperPath,
+		CredHelperTTL:  55,
+	}
+}
+
+// daemonModeKeys returns the inference key set for daemon-mode (--daemon opt-in).
+// withOTEL adds OTLP endpoint/protocol keys pointing at the same localhost port.
+//
+// The OTLP endpoint carries the /otel path prefix: Claude Desktop's Cowork
+// exporter treats otlpEndpoint as a base URL and appends /v1/metrics,
+// /v1/logs, /v1/traces itself. The daemon's OTEL proxy route is mounted at
+// /otel/ (the bare / route is the inference catch-all), so without the
+// prefix every signal would land on the inference handler and be dropped.
+func daemonModeKeys(port int, fakeKey string, withOTEL bool) modeKeys {
+	k := modeKeys{
+		GatewayBaseURL: fmt.Sprintf("http://127.0.0.1:%d", port),
+		GatewayAPIKey:  fakeKey,
+	}
+	if withOTEL {
+		k.OTELEndpoint = fmt.Sprintf("http://127.0.0.1:%d/otel", port)
+		k.OTELProtocol = "http/protobuf"
+	}
+	return k
+}
 
 // helperDebugLog appends a single diagnostic line to
 // ~/Library/Logs/databricks-claude/credential-helper.log (or the platform
@@ -92,12 +156,16 @@ func runDesktopCommand(args []string) {
 		os.Exit(0)
 	case "generate-config":
 		forPkg, _ := extractForPkgFlag(args[1:])
+		daemon := extractDaemonFlag(args[1:])
+		port := extractDesktopPortFlag(args[1:])
+		fakeKey := extractDaemonFakeKeyFlag(args[1:])
+		withOTEL := hasFlag(args[1:], "--otel")
 		runGenerateDesktopConfig(
 			extractProfileFlag(args[1:]),
 			extractOutputFlag(args[1:]),
 			extractBinaryPathFlag(args[1:]),
 			extractDatabricksCLIPathFlag(args[1:]),
-			forPkg,
+			forPkg, daemon, port, fakeKey, withOTEL,
 		)
 	case "credential-helper":
 		runCredentialHelper(extractProfileFlag(args[1:]))
@@ -159,6 +227,14 @@ Flags:
   --cert string                 generate-trust-profile: path to a PEM-encoded
                                 x509 certificate (the .pkg signing cert) to
                                 wrap as a trusted root.
+  --daemon                      generate-config: emit daemon-mode artifacts pointing
+                                at a local 'databricks-claude serve' daemon instead
+                                of the Databricks AI Gateway. Default: helper-mode.
+  --port int                    generate-config --daemon: daemon port for
+                                gatewayBaseUrl (default: state file > 49153).
+  --daemon-fake-key string      generate-config --daemon: static API key embedded
+                                in artifacts (localhost gate, not a real credential).
+                                Default: built-in constant with a banner warning.
 
 Examples:
   # First-time setup on your Mac.
@@ -298,7 +374,7 @@ func runCredentialHelper(profile string) {
 // When outputPath is empty, both .mobileconfig and .reg are always written so
 // one invocation produces artifacts for every supported Claude Desktop
 // platform. Use --output to write a single specific file.
-func runGenerateDesktopConfig(profile, outputPath, binaryPathOverride, databricksCLIPath string, forPkg bool) {
+func runGenerateDesktopConfig(profile, outputPath, binaryPathOverride, databricksCLIPath string, forPkg, daemon bool, portOverride int, fakeKey string, withOTEL bool) {
 	log.SetOutput(io.Discard)
 
 	resolved := profile
@@ -345,23 +421,41 @@ func runGenerateDesktopConfig(profile, outputPath, binaryPathOverride, databrick
 		fmt.Fprintf(os.Stderr, "Pinned databricks CLI path: %s\n", databricksCLIPath)
 	}
 
-	host, err := DiscoverHost(resolved, "")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "databricks-claude: failed to discover host for profile %q: %v\n", resolved, err)
-		fmt.Fprintf(os.Stderr, "Run 'databricks auth login --profile %s' first.\n", resolved)
-		os.Exit(1)
+	// Resolve daemon port: flag > state.Port > defaultPort
+	resolvedPort := resolvePort(portOverride, loadState())
+
+	// Build mode keys and emit daemon warning if needed.
+	var keys modeKeys
+	if daemon {
+		if fakeKey == "" {
+			fakeKey = daemonFakeKeyDefault
+			fmt.Fprint(os.Stderr, daemonFakeKeyWarning)
+		}
+		keys = daemonModeKeys(resolvedPort, fakeKey, withOTEL)
+	} else {
+		host, err := DiscoverHost(resolved, "")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "databricks-claude: failed to discover host for profile %q: %v\n", resolved, err)
+			fmt.Fprintf(os.Stderr, "Run 'databricks auth login --profile %s' first.\n", resolved)
+			os.Exit(1)
+		}
+		gatewayURL := ConstructGatewayURL(host)
+
+		helperPath, err := resolveHelperPath(binaryPathOverride, forPkg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "databricks-claude: %v\n", err)
+			os.Exit(1)
+		}
+		keys = helperModeKeys(gatewayURL, helperPath)
 	}
 
-	gatewayURL := ConstructGatewayURL(host)
-
-	helperPath, err := resolveHelperPath(binaryPathOverride, forPkg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "databricks-claude: %v\n", err)
-		os.Exit(1)
+	daemonPort := 0
+	if daemon {
+		daemonPort = resolvedPort
 	}
 
 	if outputPath != "" {
-		if err := writeDesktopConfigByPath(outputPath, gatewayURL, helperPath, resolved, databricksCLIPath); err != nil {
+		if err := writeDesktopConfigByPath(outputPath, keys, resolved, databricksCLIPath, daemonPort); err != nil {
 			fmt.Fprintf(os.Stderr, "databricks-claude: %v\n", err)
 			os.Exit(1)
 		}
@@ -385,19 +479,19 @@ func runGenerateDesktopConfig(profile, outputPath, binaryPathOverride, databrick
 		path    string
 		content []byte
 	}
-	mc, err := buildMobileconfig(gatewayURL, helperPath, resolved, databricksCLIPath)
+	mc, err := buildMobileconfig(keys, resolved, databricksCLIPath, daemonPort)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "databricks-claude: %v\n", err)
 		os.Exit(1)
 	}
-	dev, err := buildDevModeJSON(gatewayURL, helperPath, resolved, databricksCLIPath)
+	dev, err := buildDevModeJSON(keys, resolved, databricksCLIPath, daemonPort)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "databricks-claude: %v\n", err)
 		os.Exit(1)
 	}
 	arts := []artifact{
 		{"databricks-claude-desktop.mobileconfig", []byte(mc)},
-		{"databricks-claude-desktop.reg", []byte(buildRegFile(gatewayURL, helperPath, resolved, databricksCLIPath))},
+		{"databricks-claude-desktop.reg", []byte(buildRegFile(keys, resolved, databricksCLIPath, daemonPort))},
 		{"databricks-claude-desktop.json", dev},
 	}
 	wrote := []string{}
@@ -451,29 +545,29 @@ func resolveHelperPath(override string, forPkg bool) (string, error) {
 // host OS when no recognised extension is present) and writes to outputPath
 // atomically. For .json outputs, guardDevJSONOutputPath protects against
 // accidentally clobbering ~/.claude/settings.json via a typo.
-func writeDesktopConfigByPath(outputPath, gatewayURL, exe, profile, cliPath string) error {
+func writeDesktopConfigByPath(outputPath string, keys modeKeys, profile, cliPath string, daemonPort int) error {
 	lower := strings.ToLower(outputPath)
 	var data []byte
 	var err error
 	switch {
 	case strings.HasSuffix(lower, ".mobileconfig"):
 		var s string
-		s, err = buildMobileconfig(gatewayURL, exe, profile, cliPath)
+		s, err = buildMobileconfig(keys, profile, cliPath, daemonPort)
 		data = []byte(s)
 	case strings.HasSuffix(lower, ".reg"):
-		data = []byte(buildRegFile(gatewayURL, exe, profile, cliPath))
+		data = []byte(buildRegFile(keys, profile, cliPath, daemonPort))
 	case strings.HasSuffix(lower, ".json"):
 		if err := guardDevJSONOutputPath(outputPath); err != nil {
 			return err
 		}
-		data, err = buildDevModeJSON(gatewayURL, exe, profile, cliPath)
+		data, err = buildDevModeJSON(keys, profile, cliPath, daemonPort)
 	default:
 		// Fall back to host platform.
 		if runtime.GOOS == "windows" {
-			data = []byte(buildRegFile(gatewayURL, exe, profile, cliPath))
+			data = []byte(buildRegFile(keys, profile, cliPath, daemonPort))
 		} else {
 			var s string
-			s, err = buildMobileconfig(gatewayURL, exe, profile, cliPath)
+			s, err = buildMobileconfig(keys, profile, cliPath, daemonPort)
 			data = []byte(s)
 		}
 	}
@@ -557,20 +651,26 @@ func newUUID() (string, error) {
 }
 
 // buildMobileconfig renders the macOS Claude Desktop Configuration Profile.
-// Three distinct UUIDs are generated: one for the Anthropic payload, one for
-// the IceRhymers/databricks-claude payload, and one for the outer profile.
-// The second payload carries databricksProfile (and databricksCliPath when
-// non-empty) so endpoint helpers can resolve their inputs without a state file.
-func buildMobileconfig(gatewayURL, helperPath, profile, cliPath string) (string, error) {
-	innerUUID, err := newUUID()
+// Dispatches to helper-mode or daemon-mode based on keys.CredHelper.
+func buildMobileconfig(keys modeKeys, profile, cliPath string, daemonPort int) (string, error) {
+	if keys.CredHelper != "" {
+		return buildMobileconfigHelperMode(keys.GatewayBaseURL, keys.CredHelper, profile, cliPath)
+	}
+	return buildMobileconfigDaemonMode(keys, profile, cliPath, daemonPort)
+}
+
+// buildMobileconfigHelperMode is the original buildMobileconfig implementation,
+// preserved verbatim to guarantee byte-identical output in helper-mode.
+func buildMobileconfigHelperMode(gatewayURL, helperPath, profile, cliPath string) (string, error) {
+	innerUUID, err := uuidGenerator()
 	if err != nil {
 		return "", err
 	}
-	ourUUID, err := newUUID()
+	ourUUID, err := uuidGenerator()
 	if err != nil {
 		return "", err
 	}
-	outerUUID, err := newUUID()
+	outerUUID, err := uuidGenerator()
 	if err != nil {
 		return "", err
 	}
@@ -662,6 +762,132 @@ func buildMobileconfig(gatewayURL, helperPath, profile, cliPath string) (string,
 `, nil
 }
 
+// buildMobileconfigDaemonMode renders the daemon-mode variant of the macOS
+// Configuration Profile. Omits inferenceCredentialHelper / TTL; emits
+// gatewayBaseUrl pointing at 127.0.0.1:<port> with a static gatewayApiKey.
+// Adds daemonPort + daemonMode to the com.icerhymers.databricks-claude payload.
+// daemonPort is a future-use field: the daemon currently does not read it from
+// MDM (it reads state.Port at startup), but endpoint tooling will use it in a
+// future issue to cross-check that the daemon is listening on the expected port.
+func buildMobileconfigDaemonMode(keys modeKeys, profile, cliPath string, daemonPort int) (string, error) {
+	innerUUID, err := uuidGenerator()
+	if err != nil {
+		return "", err
+	}
+	ourUUID, err := uuidGenerator()
+	if err != nil {
+		return "", err
+	}
+	outerUUID, err := uuidGenerator()
+	if err != nil {
+		return "", err
+	}
+
+	var b strings.Builder
+
+	// Anthropic payload inference section — mode-specific keys only.
+	var inferenceXML strings.Builder
+	fmt.Fprintf(&inferenceXML, "\t\t\t\t<key>inferenceGatewayBaseUrl</key>\n\t\t\t\t<string>%s</string>\n", plistEscape(keys.GatewayBaseURL))
+	if keys.GatewayAPIKey != "" {
+		fmt.Fprintf(&inferenceXML, "\t\t\t\t<key>inferenceGatewayApiKey</key>\n\t\t\t\t<string>%s</string>\n", plistEscape(keys.GatewayAPIKey))
+	}
+	inferenceXML.WriteString("\t\t\t\t<key>inferenceGatewayAuthScheme</key>\n\t\t\t\t<string>bearer</string>\n")
+	fmt.Fprintf(&inferenceXML, "\t\t\t\t<key>inferenceModels</key>\n\t\t\t\t<string>%s</string>\n", plistEscape(inferenceModelsJSON))
+	if keys.OTELEndpoint != "" {
+		fmt.Fprintf(&inferenceXML, "\t\t\t\t<key>otlpEndpoint</key>\n\t\t\t\t<string>%s</string>\n", plistEscape(keys.OTELEndpoint))
+		fmt.Fprintf(&inferenceXML, "\t\t\t\t<key>otlpProtocol</key>\n\t\t\t\t<string>%s</string>\n", plistEscape(keys.OTELProtocol))
+	}
+
+	// IceRhymers payload — same as helper-mode plus daemonPort/daemonMode.
+	var ourXML strings.Builder
+	fmt.Fprintf(&ourXML, "\t\t\t\t<key>databricksProfile</key>\n\t\t\t\t<string>%s</string>", plistEscape(profile))
+	if cliPath != "" {
+		fmt.Fprintf(&ourXML, "\n\t\t\t\t<key>databricksCliPath</key>\n\t\t\t\t<string>%s</string>", plistEscape(cliPath))
+	}
+	// daemonPort and daemonMode are emitted for endpoint tooling to cross-check.
+	// pkg/mdmprofile does not yet read them (future issue); daemonMode is a
+	// boolean sentinel for any future endpoint-side conditional.
+	if daemonPort > 0 {
+		fmt.Fprintf(&ourXML, "\n\t\t\t\t<key>daemonPort</key>\n\t\t\t\t<integer>%d</integer>", daemonPort)
+		ourXML.WriteString("\n\t\t\t\t<key>daemonMode</key>\n\t\t\t\t<true/>")
+	}
+
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+	<dict>
+		<key>PayloadContent</key>
+		<array>
+			<dict>
+				<key>PayloadType</key>
+				<string>com.anthropic.claudefordesktop</string>
+				<key>PayloadIdentifier</key>
+				<string>com.anthropic.claudefordesktop.settings</string>
+				<key>PayloadUUID</key>
+				<string>` + innerUUID + `</string>
+				<key>PayloadVersion</key>
+				<integer>1</integer>
+				<key>PayloadDisplayName</key>
+				<string>Claude Desktop</string>
+				<key>disableDeploymentModeChooser</key>
+				<true/>
+				<key>inferenceProvider</key>
+				<string>gateway</string>
+`)
+	b.WriteString(inferenceXML.String())
+	b.WriteString(`				<key>isClaudeCodeForDesktopEnabled</key>
+				<true/>
+				<key>isDesktopExtensionEnabled</key>
+				<true/>
+				<key>isDesktopExtensionDirectoryEnabled</key>
+				<true/>
+				<key>isDesktopExtensionSignatureRequired</key>
+				<false/>
+				<key>isLocalDevMcpEnabled</key>
+				<true/>
+				<key>disableAutoUpdates</key>
+				<false/>
+				<key>disableEssentialTelemetry</key>
+				<false/>
+				<key>disableNonessentialTelemetry</key>
+				<false/>
+				<key>disableNonessentialServices</key>
+				<false/>
+			</dict>
+			<dict>
+				<key>PayloadType</key>
+				<string>com.icerhymers.databricks-claude</string>
+				<key>PayloadIdentifier</key>
+				<string>com.icerhymers.databricks-claude.settings</string>
+				<key>PayloadUUID</key>
+				<string>` + ourUUID + `</string>
+				<key>PayloadVersion</key>
+				<integer>1</integer>
+				<key>PayloadDisplayName</key>
+				<string>Databricks Claude Settings</string>
+`)
+	b.WriteString(ourXML.String())
+	b.WriteString(`
+			</dict>
+		</array>
+		<key>PayloadDisplayName</key>
+		<string>Claude Desktop Third-Party Inference</string>
+		<key>PayloadIdentifier</key>
+		<string>com.anthropic.claudefordesktop.profile</string>
+		<key>PayloadType</key>
+		<string>Configuration</string>
+		<key>PayloadUUID</key>
+		<string>` + outerUUID + `</string>
+		<key>PayloadVersion</key>
+		<integer>1</integer>
+		<key>PayloadScope</key>
+		<string>User</string>
+	</dict>
+</plist>
+`)
+	return b.String(), nil
+}
+
 // plistEscape escapes characters that are illegal inside a plist <string>
 // element: &, <, >. Quotes/apostrophes don't strictly need escaping inside
 // element content but we encode them defensively for safety.
@@ -676,19 +902,26 @@ func plistEscape(s string) string {
 	return r.Replace(s)
 }
 
-func buildRegFile(gatewayURL, helperPath, profile, cliPath string) string {
-	// .reg uses CRLF line endings and a UTF-16-or-UTF-8-with-BOM header.
-	// Plain UTF-8 with the documented header works on modern Windows.
+func buildRegFile(keys modeKeys, profile, cliPath string, daemonPort int) string {
 	var b strings.Builder
 	b.WriteString("Windows Registry Editor Version 5.00\r\n\r\n")
 	b.WriteString("[HKEY_CURRENT_USER\\SOFTWARE\\Policies\\Claude]\r\n")
 	b.WriteString(`"disableDeploymentModeChooser"=dword:00000001` + "\r\n")
 	b.WriteString(`"inferenceProvider"="gateway"` + "\r\n")
-	fmt.Fprintf(&b, "\"inferenceGatewayBaseUrl\"=\"%s\"\r\n", regEscape(gatewayURL))
+	fmt.Fprintf(&b, "\"inferenceGatewayBaseUrl\"=\"%s\"\r\n", regEscape(keys.GatewayBaseURL))
+	if keys.GatewayAPIKey != "" {
+		fmt.Fprintf(&b, "\"inferenceGatewayApiKey\"=\"%s\"\r\n", regEscape(keys.GatewayAPIKey))
+	}
 	b.WriteString(`"inferenceGatewayAuthScheme"="bearer"` + "\r\n")
 	fmt.Fprintf(&b, "\"inferenceModels\"=\"%s\"\r\n", regEscape(inferenceModelsJSON))
-	fmt.Fprintf(&b, "\"inferenceCredentialHelper\"=\"%s\"\r\n", regEscape(helperPath))
-	b.WriteString(`"inferenceCredentialHelperTtlSec"="55"` + "\r\n")
+	if keys.CredHelper != "" {
+		fmt.Fprintf(&b, "\"inferenceCredentialHelper\"=\"%s\"\r\n", regEscape(keys.CredHelper))
+		fmt.Fprintf(&b, "\"inferenceCredentialHelperTtlSec\"=\"%d\"\r\n", keys.CredHelperTTL)
+	}
+	if keys.OTELEndpoint != "" {
+		fmt.Fprintf(&b, "\"otlpEndpoint\"=\"%s\"\r\n", regEscape(keys.OTELEndpoint))
+		fmt.Fprintf(&b, "\"otlpProtocol\"=\"%s\"\r\n", regEscape(keys.OTELProtocol))
+	}
 	b.WriteString(`"isClaudeCodeForDesktopEnabled"=dword:00000001` + "\r\n")
 	b.WriteString(`"isDesktopExtensionEnabled"=dword:00000001` + "\r\n")
 	b.WriteString(`"isDesktopExtensionDirectoryEnabled"=dword:00000001` + "\r\n")
@@ -698,13 +931,16 @@ func buildRegFile(gatewayURL, helperPath, profile, cliPath string) string {
 	b.WriteString(`"disableEssentialTelemetry"=dword:00000000` + "\r\n")
 	b.WriteString(`"disableNonessentialTelemetry"=dword:00000000` + "\r\n")
 	b.WriteString(`"disableNonessentialServices"=dword:00000000` + "\r\n")
-	// IceRhymers/databricks-claude key: carries Databricks profile and CLI
-	// path so the credential helper on endpoint machines can resolve them
-	// without a state file.
 	b.WriteString("\r\n[HKEY_CURRENT_USER\\SOFTWARE\\IceRhymers\\databricks-claude]\r\n")
 	fmt.Fprintf(&b, "\"databricksProfile\"=\"%s\"\r\n", regEscape(profile))
 	if cliPath != "" {
 		fmt.Fprintf(&b, "\"databricksCliPath\"=\"%s\"\r\n", regEscape(cliPath))
+	}
+	// daemonPort is emitted for endpoint tooling cross-check; not yet consumed
+	// by pkg/mdmprofile (future issue). daemonMode is a boolean sentinel.
+	if daemonPort > 0 {
+		fmt.Fprintf(&b, "\"daemonPort\"=dword:%08X\r\n", daemonPort)
+		b.WriteString("\"daemonMode\"=dword:00000001\r\n")
 	}
 	return b.String()
 }
@@ -721,28 +957,84 @@ func buildRegFile(gatewayURL, helperPath, profile, cliPath string) string {
 // at a cadence that always sees a fresh token. Diverging from the MDM TTL
 // would give dev-mode users different effective behavior than fleet users.
 //
-// inferenceGatewayApiKey is intentionally absent: the validated example shows
-// "••••••••" which is Desktop's UI placeholder. Our auth flow uses the OAuth
-// credential helper, so no static key is needed.
+// inferenceGatewayApiKey is intentionally absent in helper-mode: the validated
+// example shows "••••••••" which is Desktop's UI placeholder. Our auth flow
+// uses the OAuth credential helper, so no static key is needed. In daemon-mode
+// it is present as a localhost gate (not a real credential).
 //
 // inferenceModels is reused from inferenceModelsJSON via []json.RawMessage so
 // the model list never drifts between the three artifacts.
-func buildDevModeJSON(gatewayURL, helperPath, profile, cliPath string) ([]byte, error) {
+func buildDevModeJSON(keys modeKeys, profile, cliPath string, daemonPort int) ([]byte, error) {
 	var models []json.RawMessage
 	if err := json.Unmarshal([]byte(inferenceModelsJSON), &models); err != nil {
 		return nil, fmt.Errorf("inferenceModelsJSON is malformed: %w", err)
 	}
 
-	cfg := struct {
+	if keys.CredHelper != "" {
+		// Helper-mode: same struct as today for byte-identical output.
+		cfg := struct {
+			DatabricksProfile                   string            `json:"databricksProfile"`
+			DatabricksCliPath                   string            `json:"databricksCliPath,omitempty"`
+			DisableDeploymentModeChooser        bool              `json:"disableDeploymentModeChooser"`
+			InferenceProvider                   string            `json:"inferenceProvider"`
+			InferenceGatewayBaseUrl             string            `json:"inferenceGatewayBaseUrl"`
+			InferenceGatewayAuthScheme          string            `json:"inferenceGatewayAuthScheme"`
+			InferenceModels                     []json.RawMessage `json:"inferenceModels"`
+			InferenceCredentialHelper           string            `json:"inferenceCredentialHelper"`
+			InferenceCredentialHelperTtlSec     int               `json:"inferenceCredentialHelperTtlSec"`
+			IsClaudeCodeForDesktopEnabled       bool              `json:"isClaudeCodeForDesktopEnabled"`
+			IsDesktopExtensionEnabled           bool              `json:"isDesktopExtensionEnabled"`
+			IsDesktopExtensionDirectoryEnabled  bool              `json:"isDesktopExtensionDirectoryEnabled"`
+			IsDesktopExtensionSignatureRequired bool              `json:"isDesktopExtensionSignatureRequired"`
+			IsLocalDevMcpEnabled                bool              `json:"isLocalDevMcpEnabled"`
+			DisableAutoUpdates                  bool              `json:"disableAutoUpdates"`
+			DisableEssentialTelemetry           bool              `json:"disableEssentialTelemetry"`
+			DisableNonessentialTelemetry        bool              `json:"disableNonessentialTelemetry"`
+			DisableNonessentialServices         bool              `json:"disableNonessentialServices"`
+		}{
+			DatabricksProfile:                   profile,
+			DatabricksCliPath:                   cliPath,
+			DisableDeploymentModeChooser:        true,
+			InferenceProvider:                   "gateway",
+			InferenceGatewayBaseUrl:             keys.GatewayBaseURL,
+			InferenceGatewayAuthScheme:          "bearer",
+			InferenceModels:                     models,
+			InferenceCredentialHelper:           keys.CredHelper,
+			InferenceCredentialHelperTtlSec:     keys.CredHelperTTL,
+			IsClaudeCodeForDesktopEnabled:       true,
+			IsDesktopExtensionEnabled:           true,
+			IsDesktopExtensionDirectoryEnabled:  true,
+			IsDesktopExtensionSignatureRequired: false,
+			IsLocalDevMcpEnabled:                true,
+			DisableAutoUpdates:                  false,
+			DisableEssentialTelemetry:           false,
+			DisableNonessentialTelemetry:        false,
+			DisableNonessentialServices:         false,
+		}
+		out, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("marshal dev-mode config: %w", err)
+		}
+		return append(out, '\n'), nil
+	}
+
+	// Daemon-mode: omit CredentialHelper/TTL; add GatewayApiKey; add
+	// daemonPort/daemonMode in the IceRhymers section; optional OTLP keys.
+	// daemonPort is future-use for endpoint cross-check (pkg/mdmprofile does
+	// not yet consume it; see daemon-mode design notes in issue #164).
+	type daemonCfg struct {
 		DatabricksProfile                   string            `json:"databricksProfile"`
 		DatabricksCliPath                   string            `json:"databricksCliPath,omitempty"`
+		DaemonPort                          int               `json:"daemonPort,omitempty"`
+		DaemonMode                          bool              `json:"daemonMode,omitempty"`
 		DisableDeploymentModeChooser        bool              `json:"disableDeploymentModeChooser"`
 		InferenceProvider                   string            `json:"inferenceProvider"`
 		InferenceGatewayBaseUrl             string            `json:"inferenceGatewayBaseUrl"`
+		InferenceGatewayApiKey              string            `json:"inferenceGatewayApiKey,omitempty"`
 		InferenceGatewayAuthScheme          string            `json:"inferenceGatewayAuthScheme"`
 		InferenceModels                     []json.RawMessage `json:"inferenceModels"`
-		InferenceCredentialHelper           string            `json:"inferenceCredentialHelper"`
-		InferenceCredentialHelperTtlSec     int               `json:"inferenceCredentialHelperTtlSec"`
+		OtlpEndpoint                        string            `json:"otlpEndpoint,omitempty"`
+		OtlpProtocol                        string            `json:"otlpProtocol,omitempty"`
 		IsClaudeCodeForDesktopEnabled       bool              `json:"isClaudeCodeForDesktopEnabled"`
 		IsDesktopExtensionEnabled           bool              `json:"isDesktopExtensionEnabled"`
 		IsDesktopExtensionDirectoryEnabled  bool              `json:"isDesktopExtensionDirectoryEnabled"`
@@ -752,16 +1044,20 @@ func buildDevModeJSON(gatewayURL, helperPath, profile, cliPath string) ([]byte, 
 		DisableEssentialTelemetry           bool              `json:"disableEssentialTelemetry"`
 		DisableNonessentialTelemetry        bool              `json:"disableNonessentialTelemetry"`
 		DisableNonessentialServices         bool              `json:"disableNonessentialServices"`
-	}{
+	}
+	cfg := daemonCfg{
 		DatabricksProfile:                   profile,
 		DatabricksCliPath:                   cliPath,
+		DaemonPort:                          daemonPort,
+		DaemonMode:                          daemonPort > 0,
 		DisableDeploymentModeChooser:        true,
 		InferenceProvider:                   "gateway",
-		InferenceGatewayBaseUrl:             gatewayURL,
+		InferenceGatewayBaseUrl:             keys.GatewayBaseURL,
+		InferenceGatewayApiKey:              keys.GatewayAPIKey,
 		InferenceGatewayAuthScheme:          "bearer",
 		InferenceModels:                     models,
-		InferenceCredentialHelper:           helperPath,
-		InferenceCredentialHelperTtlSec:     55,
+		OtlpEndpoint:                        keys.OTELEndpoint,
+		OtlpProtocol:                        keys.OTELProtocol,
 		IsClaudeCodeForDesktopEnabled:       true,
 		IsDesktopExtensionEnabled:           true,
 		IsDesktopExtensionDirectoryEnabled:  true,
@@ -772,13 +1068,11 @@ func buildDevModeJSON(gatewayURL, helperPath, profile, cliPath string) ([]byte, 
 		DisableNonessentialTelemetry:        false,
 		DisableNonessentialServices:         false,
 	}
-
 	out, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("marshal dev-mode config: %w", err)
+		return nil, fmt.Errorf("marshal daemon dev-mode config: %w", err)
 	}
-	out = append(out, '\n')
-	return out, nil
+	return append(out, '\n'), nil
 }
 
 // writeFileAtomic writes data to path atomically: write to <path>.tmp in the
@@ -922,6 +1216,54 @@ func extractForPkgFlag(args []string) (forPkg bool, remaining []string) {
 		remaining = append(remaining, a)
 	}
 	return forPkg, remaining
+}
+
+// extractDaemonFlag scans args for the boolean --daemon flag.
+// Returns true if present. Same pattern as extractForPkgFlag but simpler
+// (no explicit =false form needed for daemon-mode; absence means helper-mode).
+func extractDaemonFlag(args []string) bool {
+	for _, a := range args {
+		if a == "--daemon" {
+			return true
+		}
+		if strings.HasPrefix(a, "--daemon=") {
+			v := strings.TrimPrefix(a, "--daemon=")
+			return v == "true" || v == "1" || v == ""
+		}
+	}
+	return false
+}
+
+// extractDesktopPortFlag scans args for --port / --port=N specifically for
+// the desktop generate-config subcommand. Returns 0 if not present (the caller
+// resolves the default from state or the package constant).
+func extractDesktopPortFlag(args []string) int {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--port" && i+1 < len(args) {
+			v, _ := strconv.Atoi(args[i+1])
+			return v
+		}
+		if strings.HasPrefix(a, "--port=") {
+			v, _ := strconv.Atoi(strings.TrimPrefix(a, "--port="))
+			return v
+		}
+	}
+	return 0
+}
+
+// extractDaemonFakeKeyFlag scans args for --daemon-fake-key / --daemon-fake-key=value.
+func extractDaemonFakeKeyFlag(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--daemon-fake-key" && i+1 < len(args) {
+			return args[i+1]
+		}
+		if strings.HasPrefix(a, "--daemon-fake-key=") {
+			return strings.TrimPrefix(a, "--daemon-fake-key=")
+		}
+	}
+	return ""
 }
 
 // hasFlag returns true if any element of args equals name (or starts with

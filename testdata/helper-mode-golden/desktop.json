@@ -1,0 +1,39 @@
+{
+  "databricksProfile": "testprofile",
+  "disableDeploymentModeChooser": true,
+  "inferenceProvider": "gateway",
+  "inferenceGatewayBaseUrl": "https://adb-test.azuredatabricks.net/ai-gateway/anthropic",
+  "inferenceGatewayAuthScheme": "bearer",
+  "inferenceModels": [
+    {
+      "name": "databricks-claude-opus-4-7",
+      "supports1m": true
+    },
+    {
+      "name": "databricks-claude-opus-4-6",
+      "supports1m": true
+    },
+    {
+      "name": "databricks-claude-sonnet-4-6",
+      "supports1m": true
+    },
+    {
+      "name": "databricks-claude-sonnet-4-5",
+      "supports1m": true
+    },
+    {
+      "name": "databricks-claude-haiku-4-5"
+    }
+  ],
+  "inferenceCredentialHelper": "/usr/local/bin/databricks-claude-credential-helper",
+  "inferenceCredentialHelperTtlSec": 55,
+  "isClaudeCodeForDesktopEnabled": true,
+  "isDesktopExtensionEnabled": true,
+  "isDesktopExtensionDirectoryEnabled": true,
+  "isDesktopExtensionSignatureRequired": false,
+  "isLocalDevMcpEnabled": true,
+  "disableAutoUpdates": false,
+  "disableEssentialTelemetry": false,
+  "disableNonessentialTelemetry": false,
+  "disableNonessentialServices": false
+}

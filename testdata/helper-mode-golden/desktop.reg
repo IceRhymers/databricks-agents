@@ -1,0 +1,22 @@
+Windows Registry Editor Version 5.00
+
+[HKEY_CURRENT_USER\SOFTWARE\Policies\Claude]
+"disableDeploymentModeChooser"=dword:00000001
+"inferenceProvider"="gateway"
+"inferenceGatewayBaseUrl"="https://adb-test.azuredatabricks.net/ai-gateway/anthropic"
+"inferenceGatewayAuthScheme"="bearer"
+"inferenceModels"="[{\"name\":\"databricks-claude-opus-4-7\",\"supports1m\":true},{\"name\":\"databricks-claude-opus-4-6\",\"supports1m\":true},{\"name\":\"databricks-claude-sonnet-4-6\",\"supports1m\":true},{\"name\":\"databricks-claude-sonnet-4-5\",\"supports1m\":true},{\"name\":\"databricks-claude-haiku-4-5\"}]"
+"inferenceCredentialHelper"="/usr/local/bin/databricks-claude-credential-helper"
+"inferenceCredentialHelperTtlSec"="55"
+"isClaudeCodeForDesktopEnabled"=dword:00000001
+"isDesktopExtensionEnabled"=dword:00000001
+"isDesktopExtensionDirectoryEnabled"=dword:00000001
+"isDesktopExtensionSignatureRequired"=dword:00000000
+"isLocalDevMcpEnabled"=dword:00000001
+"disableAutoUpdates"=dword:00000000
+"disableEssentialTelemetry"=dword:00000000
+"disableNonessentialTelemetry"=dword:00000000
+"disableNonessentialServices"=dword:00000000
+
+[HKEY_CURRENT_USER\SOFTWARE\IceRhymers\databricks-claude]
+"databricksProfile"="testprofile"

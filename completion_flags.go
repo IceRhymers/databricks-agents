@@ -45,6 +45,8 @@ var flagDefs = []completion.FlagDef{
 	{Name: "with-websearch", Description: "Locally fulfill Anthropic web_search/web_fetch tools (workaround for FMAPI gap)"},
 	{Name: "websearch-backend", Description: "Web search backend (duckduckgo|none)", TakesArg: true},
 	{Name: "websearch-fetch-budget", Description: "Per-fetch byte budget for --with-websearch (default 102400)", TakesArg: true},
+	{Name: "daemon", Description: "desktop generate-config: emit daemon-mode artifacts (omits credential helper, sets localhost gatewayBaseUrl)"},
+	{Name: "daemon-fake-key", Description: "desktop generate-config --daemon: static fake API key (localhost gate)", TakesArg: true},
 }
 
 // knownFlags is the set of flag names (with "--" prefix) that databricks-claude
