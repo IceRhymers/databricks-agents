@@ -846,6 +846,38 @@ func TestBuildServeProxyConfig_Matrix(t *testing.T) {
 			t.Error("daemon mode: cfg.WebSearch.Enabled = true with no state, want false")
 		}
 	})
+
+	// Bidirectional WebSearch positive case. The matrix above asserts
+	// Enabled==false with empty state for BOTH modes — that branch alone
+	// is tautological (deleting the factory's `Enabled: <wired>` line
+	// still yields the zero value `false`). This sub-test populates state
+	// with WithWebSearch=true and asserts the factory propagates it to
+	// BOTH lifecycle policies. If a future refactor drops the WebSearch
+	// wiring for one mode, this fails loudly — the regression net the
+	// review for #180 flagged was missing.
+	t.Run("websearch_enabled_both_modes", func(t *testing.T) {
+		stOn := persistentState{
+			WithWebSearch:        true,
+			WebSearchBackend:     "duckduckgo",
+			WebSearchFetchBudget: 7 * 1024,
+		}
+		for _, mode := range []serveMode{serveModeSession, serveModeDaemon} {
+			name := "session"
+			if mode == serveModeDaemon {
+				name = "daemon"
+			}
+			cfg := buildServeProxyConfig(stOn, r, mode)
+			if !cfg.WebSearch.Enabled {
+				t.Errorf("%s mode: cfg.WebSearch.Enabled = false with state.WithWebSearch=true, want true (factory dropped the wiring for this mode)", name)
+			}
+			if cfg.WebSearch.Backend == nil {
+				t.Errorf("%s mode: cfg.WebSearch.Backend = nil, want a concrete backend impl", name)
+			}
+			if cfg.WebSearch.FetchBudget != 7*1024 {
+				t.Errorf("%s mode: cfg.WebSearch.FetchBudget = %d, want %d", name, cfg.WebSearch.FetchBudget, 7*1024)
+			}
+		}
+	})
 }
 
 // TestParseServeFlags_SessionMode verifies that the --session-mode boolean
