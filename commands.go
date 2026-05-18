@@ -143,6 +143,17 @@ var desktopCommand = cmd.Command{
 		{Name: "otel", Description: "generate-config --daemon: also emit otlpEndpoint pointing at the daemon (Cowork OTEL routing)"},
 		{Name: "help", Short: "h", Description: "Show help message"},
 	},
+	// Action keywords parsed positionally by runDesktopCommand. They have no
+	// per-action Flags here because runDesktopCommand passes args[1:] (every
+	// arg after the action) into a UNION flag scanner — splitting flags per
+	// action would change which flags trip "unknown" detection (see comment
+	// above). Declaring the names lets shell completion offer them at
+	// `databricks-claude desktop <TAB>`.
+	Subcommands: []cmd.Command{
+		{Name: "generate-config", Short: "Generate Claude Desktop config (.mobileconfig/.reg/.json) with embedded credential-helper"},
+		{Name: "credential-helper", Short: "Internal: emit a Databricks token on stdout (invoked by Claude Desktop, not by users)"},
+		{Name: "generate-trust-profile", Short: "Generate MDM trust profile (.mobileconfig) embedding a PEM cert"},
+	},
 }
 
 // setupCommand declares the `setup` subcommand's flags + help body.
