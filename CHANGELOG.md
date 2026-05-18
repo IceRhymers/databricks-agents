@@ -1,5 +1,44 @@
 # Changelog
 
+## [1.0.0](https://github.com/IceRhymers/databricks-claude/compare/v0.19.0...v1.0.0) (2026-05-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* removes the --headless and --idle-timeout root flags. The session-scoped standalone proxy (refcounted, /shutdown, idle-timeout, settings.json restore-on-exit) is now `databricks-claude serve --session-mode`. --idle-timeout becomes a `serve` flag. The long-lived daemon now requires explicit `serve --daemon` (bare `serve` with no mode flag or sub-subcommand is a hard error — eliminates silent-degradation hazard at the hooks spawn site). serve install|uninstall|status unchanged. The hooks deployment mode ([#173](https://github.com/IceRhymers/databricks-claude/issues/173)) now spawns `serve --session-mode` instead of `--headless`; the SessionStart/SessionEnd lifecycle is verified intact.
+* removes 4 root flags. Replacements:   --install-hooks     → hooks install   --uninstall-hooks   → hooks uninstall   --headless-ensure   → hooks session-start  (hook-invoked internal)   --headless-release  → hooks session-end    (hook-invoked internal) Old flags are removed, not aliased. The generated SessionStart/SessionEnd hook JSON now invokes the new command names. No back-compat for already-installed hooks (none deployed). The hooks deployment mode itself is unchanged — proxy still spins up on SessionStart and tears down on SessionEnd.
+* removes 14 root flags. Replacements:   --otel / --otel-*-table          → config otel enable [...]   --no-otel / --no-otel-{m,l,t}    → config otel disable [...]   --with-websearch / --websearch-* → config websearch enable [...]   --write-claude-config            → config write   --print-env                      → config show Old flags are removed, not aliased — they now pass through to claude. Storage semantics (two-store model, sentinel guards, state preservation on disable, OTEL section removal) are unchanged.
+
+### Features
+
+* **cli:** --write-claude-config flag for scriptable settings.json bootstrap ([d3b9a3b](https://github.com/IceRhymers/databricks-claude/commit/d3b9a3b83d11ad35c0922e727b4c20585ebd00d8))
+* **cli:** --write-claude-config flag for scriptable settings.json bootstrap ([8da1957](https://github.com/IceRhymers/databricks-claude/commit/8da195783efd9a02bf232fafec3e95d59bd03db9)), closes [#162](https://github.com/IceRhymers/databricks-claude/issues/162)
+* **cli:** scope --help to wrapper; advertise -- passthrough ([7d63ba4](https://github.com/IceRhymers/databricks-claude/commit/7d63ba4704101a680f9924f8a983826affa9755e))
+* consolidate --headless proxy mode into `serve --session-mode` ([89c952a](https://github.com/IceRhymers/databricks-claude/commit/89c952a30c03e7e984bcceac1a658843235af3b6))
+* consolidate hooks lifecycle flags under a `hooks` subcommand ([5b4a496](https://github.com/IceRhymers/databricks-claude/commit/5b4a4961ad203dacdd459d09b11acee2340ccafb))
+* consolidate persistent-config flags under a `config` subcommand ([92b56d0](https://github.com/IceRhymers/databricks-claude/commit/92b56d01fd0c717551a9a02389c174ee566955fe))
+* **daemon:** add serve subcommand for long-lived MDM-deployed instances ([52931b2](https://github.com/IceRhymers/databricks-claude/commit/52931b21aca3aad5d9e5f3a76f3f2eaf5ab88db0))
+* **daemon:** add serve subcommand for long-lived MDM-deployed instances ([b6431af](https://github.com/IceRhymers/databricks-claude/commit/b6431afb7888e76829750656412cab5838af7b0c)), closes [#153](https://github.com/IceRhymers/databricks-claude/issues/153)
+* **daemon:** cross-platform serve install/uninstall/status ([f8978f2](https://github.com/IceRhymers/databricks-claude/commit/f8978f245008d3dc48b6361ed4574418ed05fe1e))
+* **daemon:** cross-platform serve install/uninstall/status ([b2a1f37](https://github.com/IceRhymers/databricks-claude/commit/b2a1f37e11df7824fff23a20e03950e822513d61)), closes [#155](https://github.com/IceRhymers/databricks-claude/issues/155)
+* **desktop:** --daemon mode for generate-config ([03aa065](https://github.com/IceRhymers/databricks-claude/commit/03aa065cdd69b083616d7207b2dc1fdda4f62c3e)), closes [#164](https://github.com/IceRhymers/databricks-claude/issues/164)
+* **desktop:** --daemon mode for generate-config (gatewayBaseUrl + omitted helper) ([b147c40](https://github.com/IceRhymers/databricks-claude/commit/b147c40c1992130226228e83ccd8cd1a3dc6f6a1))
+* **desktop:** databricksCliPath MDM key for endpoint CLI discovery ([eac6ba7](https://github.com/IceRhymers/databricks-claude/commit/eac6ba7e06a1fb402b1a12be0cb54a9dc46e0be8))
+* **desktop:** databricksCliPath MDM key for endpoint CLI discovery ([005eebd](https://github.com/IceRhymers/databricks-claude/commit/005eebd6a6d02f183c263fcbb810afe7f51024d5)), closes [#150](https://github.com/IceRhymers/databricks-claude/issues/150)
+* **hooks:** daemon-aware no-op behavior when serve is running ([d314974](https://github.com/IceRhymers/databricks-claude/commit/d314974e718b768a2b18157ea777bce77df775cb))
+* **hooks:** daemon-aware no-op behavior when serve is running ([1800b8d](https://github.com/IceRhymers/databricks-claude/commit/1800b8ddd5c3bf8c6de9fa861c938d654b85e6a8)), closes [#154](https://github.com/IceRhymers/databricks-claude/issues/154)
+* introduce internal/cmd command-tree registry; migrate root command ([15068bb](https://github.com/IceRhymers/databricks-claude/commit/15068bb0776b9fd83cb9653f1d3682fed4364599)), closes [#170](https://github.com/IceRhymers/databricks-claude/issues/170)
+* migrate serve/setup/desktop subcommands onto the command tree ([5579cfd](https://github.com/IceRhymers/databricks-claude/commit/5579cfdad2058a115a5577da60fe0eaff7bea4bd)), closes [#171](https://github.com/IceRhymers/databricks-claude/issues/171)
+
+
+### Bug Fixes
+
+* **build:** make Makefile work from PowerShell/cmd on Windows ([e4297ed](https://github.com/IceRhymers/databricks-claude/commit/e4297ede8a2cccb208bf0c97ddce3dd0d70142e5))
+* daemon-mode otlpEndpoint must carry /otel path prefix ([b79739b](https://github.com/IceRhymers/databricks-claude/commit/b79739bb983ecdd4051c51240611c28e161938e4))
+* **daemon:** address code review nits on PR [#159](https://github.com/IceRhymers/databricks-claude/issues/159) follow-up ([23b02f3](https://github.com/IceRhymers/databricks-claude/commit/23b02f3755d66b00e68bc2b9ce1278e38f71fedb))
+* **daemon:** install-time pre-auth + daemon-safe serve + status accuracy ([6cedf58](https://github.com/IceRhymers/databricks-claude/commit/6cedf5814b8d43b03c7a34c998cfc34f6d2c0a18))
+* **serve:** wire --with-websearch into daemon proxy config ([4f9c2a2](https://github.com/IceRhymers/databricks-claude/commit/4f9c2a294264717d9288b7876d51a0ea2e051d46))
+
 ## [0.19.0](https://github.com/IceRhymers/databricks-claude/compare/v0.18.0...v0.19.0) (2026-05-11)
 
 
