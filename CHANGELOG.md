@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.1](https://github.com/IceRhymers/databricks-claude/compare/v1.0.0...v1.0.1) (2026-05-18)
+
+
+### Bug Fixes
+
+* **completion:** escape apostrophes in zsh flag/subcommand descriptions ([8642725](https://github.com/IceRhymers/databricks-claude/commit/8642725d97bc08ddd7adb6ba91d7311c7a90b7c4))
+* **completion:** escape apostrophes in zsh flag/subcommand descriptions ([b9bd3a4](https://github.com/IceRhymers/databricks-claude/commit/b9bd3a469fae67fce720d6b0469f8e7170fc2b5a))
+
 ## [1.0.0](https://github.com/IceRhymers/databricks-claude/compare/v0.19.0...v1.0.0) (2026-05-18)
 
 
