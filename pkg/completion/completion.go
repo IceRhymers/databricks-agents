@@ -262,7 +262,7 @@ func emitZshSubcommandDispatch(rootFlags []FlagDef, subcommands []SubcommandDef)
 	var b strings.Builder
 	b.WriteString("    local -a _subcmds\n")
 	for _, s := range subcommands {
-		desc := strings.ReplaceAll(s.Description, "'", "\\'")
+		desc := zshEscape(s.Description)
 		b.WriteString("    _subcmds+=(" + fmt.Sprintf("'%s:%s'", s.Name, desc) + ")\n")
 	}
 	b.WriteString("\n")
@@ -282,7 +282,7 @@ func emitZshSubcommandDispatch(rootFlags []FlagDef, subcommands []SubcommandDef)
 		if len(sub.Subcommands) > 0 {
 			b.WriteString("            local -a _subcmds2\n")
 			for _, sub2 := range sub.Subcommands {
-				desc := strings.ReplaceAll(sub2.Description, "'", "\\'")
+				desc := zshEscape(sub2.Description)
 				b.WriteString("            _subcmds2+=(" + fmt.Sprintf("'%s:%s'", sub2.Name, desc) + ")\n")
 			}
 			b.WriteString("            case \"$sub2\" in\n")
@@ -564,9 +564,17 @@ end`
 	}
 }
 
+// zshEscape escapes a string for safe interpolation inside a zsh
+// single-quoted string. zsh does NOT honor backslash escapes inside '...';
+// the canonical way to embed a literal ' is to close the quote, emit a
+// backslash-escaped quote, and reopen: ' becomes '\''.
+func zshEscape(s string) string {
+	return strings.ReplaceAll(s, "'", "'\\''")
+}
+
 // zshFlagSpec returns the _arguments spec string for one flag.
 func zshFlagSpec(f FlagDef) string {
-	desc := f.Description
+	desc := zshEscape(f.Description)
 
 	if f.Short != "" {
 		// Pair short and long together.
