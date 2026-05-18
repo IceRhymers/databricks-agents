@@ -58,6 +58,40 @@ func TestGenerateZsh_ContainsFlags(t *testing.T) {
 	}
 }
 
+// TestGenerateZsh_EscapesApostrophesInDescriptions is a regression test for
+// the bug where a flag or subcommand description containing a single quote
+// (e.g. "emit artifacts pointing at a local 'databricks-claude serve' daemon")
+// would collapse the surrounding zsh single-quoted _arguments spec, producing
+// "_arguments:comparguments:NNN: invalid option definition" at completion time.
+// zsh does NOT honor backslash escapes inside single-quoted strings — the
+// canonical escape for a literal ' is '\''.
+func TestGenerateZsh_EscapesApostrophesInDescriptions(t *testing.T) {
+	flags := []FlagDef{
+		{Name: "daemon", Description: "emit artifacts pointing at a local 'databricks-claude serve' daemon"},
+		{Name: "host", Description: "Workspace URL forwarded to 'databricks auth login --host'", TakesArg: true},
+	}
+	subs := []SubcommandDef{
+		{Name: "desktop", Description: "Generate config for Claude's desktop app", Flags: flags},
+	}
+	out := GenerateZshFull("databricks-claude", nil, subs)
+
+	// The literal apostrophe must be escaped via '\'' (close, escaped ', reopen).
+	// The naïve backslash-escape "\\'" is INVALID inside zsh '...' strings.
+	if strings.Contains(out, `local \'databricks-claude serve\' daemon`) {
+		t.Error("zsh output contains backslash-escaped apostrophes — these don't work inside zsh single-quoted strings; use '\\''")
+	}
+	if !strings.Contains(out, `local '\''databricks-claude serve'\'' daemon`) {
+		t.Error("zsh output missing canonical '\\'' escape for apostrophe in flag description")
+	}
+	if !strings.Contains(out, `forwarded to '\''databricks auth login --host'\''`) {
+		t.Error("zsh output missing canonical '\\'' escape for apostrophe in --host description")
+	}
+	// Subcommand description with an apostrophe must also be escaped.
+	if !strings.Contains(out, `Claude'\''s desktop app`) {
+		t.Error("zsh output missing canonical '\\'' escape for apostrophe in subcommand description")
+	}
+}
+
 func TestGenerateZsh_ShortFlags(t *testing.T) {
 	out := GenerateZsh("databricks-claude", testFlags)
 	// verbose has short -v so should appear as paired spec
