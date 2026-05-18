@@ -124,17 +124,6 @@ Removes only the databricks-claude hook entries. Other hooks in your settings ar
 - The proxy starts on the configured port (default `49153`). If you use a custom port via `--port`, the hooks will respect that setting automatically (port is saved to the state file).
 - Unclean exits (force-quit, OOM kill) are covered by the idle timeout — the proxy self-exits after 30 minutes with no inference traffic.
 
-### Claude Code Plugin (marketplace install)
-
-Hooks are also distributed as a Claude Code plugin. Add this repo as a marketplace, then install the plugin:
-
-```
-/plugin marketplace add IceRhymers/databricks-claude
-/plugin install databricks-claude@IceRhymers-databricks-claude
-```
-
-The `.claude-plugin/` directory and `hooks/hooks.json` at the repo root define the plugin.
-
 ## Claude Desktop Integration
 
 `databricks-claude` can act as the credential helper for the Claude Desktop app's third-party-inference mode. Desktop calls a single executable (no args allowed) once per token TTL and uses whatever it prints to stdout as the bearer token for AI Gateway requests.

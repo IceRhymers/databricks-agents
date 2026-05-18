@@ -1,8 +1,0 @@
-{
-  "name": "databricks-claude",
-  "description": "Automatic Databricks proxy lifecycle for Claude Code — starts the proxy on session start, stops it when the last session ends",
-  "version": "1.0.0",
-  "author": {
-    "name": "IceRhymers"
-  }
-}
