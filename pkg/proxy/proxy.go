@@ -23,6 +23,30 @@ type TokenSource interface {
 	Token(ctx context.Context) (string, error)
 }
 
+// UpstreamRoute is an additive, optional path-prefix route to an upstream
+// other than InferenceUpstream. When an incoming request path starts with
+// PathPrefix, the proxy strips StripPrefix (defaults to PathPrefix when
+// empty) from the path and forwards to Upstream — reusing the same
+// token-injection / WebSocket-detect / upstream-base-path-prepend logic
+// the default inference handler uses.
+//
+// Used to wire one local proxy port to multiple Databricks AI Gateway
+// upstreams (e.g. Anthropic on / and Gemini Native on /v1beta).
+type UpstreamRoute struct {
+	// PathPrefix is matched against the incoming request path. The proxy
+	// registers this route at PathPrefix+"/" on the mux, so http.ServeMux
+	// longest-prefix-match handles dispatch ordering.
+	PathPrefix string
+	// Upstream is the full upstream URL including any base path (e.g.
+	// "https://workspace.cloud.databricks.com/ai-gateway/gemini/v1beta").
+	// The base path is prepended to the (post-strip) request path.
+	Upstream string
+	// StripPrefix is removed from the front of the incoming request path
+	// before the upstream base path is prepended. Defaults to PathPrefix
+	// when empty.
+	StripPrefix string
+}
+
 // Config holds the configuration for the proxy server.
 //
 // WebSocket note: databricks-claude (Claude Code) uses HTTP with SSE for
@@ -34,6 +58,11 @@ type TokenSource interface {
 type Config struct {
 	InferenceUpstream string
 	OTELUpstream      string
+	// Routes are optional path-prefix overrides. When a request matches a
+	// route's PathPrefix it is forwarded to that route's Upstream rather
+	// than InferenceUpstream. Leave nil/empty for byte-identical behavior
+	// to before this field existed (sibling consumers depend on this).
+	Routes []UpstreamRoute
 	// UCMetricsTable is the Unity Catalog table for OTEL metrics.
 	// Leave empty if the caller does not emit metrics (e.g. databricks-codex,
 	// which has no native metrics support). When empty the
@@ -410,6 +439,19 @@ func NewServer(config *Config) (http.Handler, error) {
 		})
 	})
 
+	// Optional path-prefix routes — registered before the catch-all so the
+	// mux's longest-prefix-match dispatches correctly. Routes share the same
+	// inferenceHandler factory (token injection + WebSocket detect + path
+	// prepend) and only differ in the upstream URL and the per-route prefix
+	// stripped from the incoming path before the prepend step.
+	for i, route := range config.Routes {
+		routeUpstream, err := url.Parse(route.Upstream)
+		if err != nil {
+			return nil, fmt.Errorf("databricks-claude: invalid Routes[%d].Upstream %q: %v", i, route.Upstream, err)
+		}
+		mux.Handle(route.PathPrefix+"/", RecoveryHandler(newRouteHandler(route, routeUpstream, config)))
+	}
+
 	mux.Handle("/otel/", RecoveryHandler(otelProxy))
 
 	// Daemon mode: explicitly reject /shutdown with 404 so it does not fall
@@ -426,6 +468,29 @@ func NewServer(config *Config) (http.Handler, error) {
 
 	// APIKey check applies to all connections including WebSocket upgrades (used by databricks-codex)
 	return requireAPIKey(mux, config.APIKey), nil
+}
+
+// newRouteHandler returns an http.Handler for a single UpstreamRoute. It is
+// a thin shim over inferenceHandler: strip the local PathPrefix from the
+// incoming request path, then delegate to the same handler the default
+// inference route uses. WebSocket detection, token injection, and the
+// upstream-base-path prepend all come along for free — no logic duplicated.
+func newRouteHandler(route UpstreamRoute, upstream *url.URL, config *Config) http.Handler {
+	inner := inferenceHandler(upstream, config, config.WebSearch)
+	stripPrefix := route.StripPrefix
+	if stripPrefix == "" {
+		stripPrefix = route.PathPrefix
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if stripPrefix != "" {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, stripPrefix)
+			if r.URL.Path == "" {
+				r.URL.Path = "/"
+			}
+			r.URL.RawPath = ""
+		}
+		inner.ServeHTTP(w, r)
+	})
 }
 
 // ValidateTLSConfig returns an error if the TLS configuration is incomplete

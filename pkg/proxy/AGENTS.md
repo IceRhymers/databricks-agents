@@ -4,7 +4,7 @@
 # proxy
 
 ## Purpose
-HTTP/WebSocket reverse proxy with two routes: inference (`/`) and OTEL (`/otel/`). Injects fresh Databricks OAuth tokens per-request, supports optional API key authentication, TLS listeners, WebSocket upgrades (for databricks-codex), and includes security checks and log sanitization.
+HTTP/WebSocket reverse proxy with two built-in routes — inference (`/`) and OTEL (`/otel/`) — plus optional `Config.Routes` for path-prefix dispatch to additional AI Gateway upstreams (e.g. Anthropic + Gemini Native on the same port). Injects fresh Databricks OAuth tokens per-request, supports optional API key authentication, TLS listeners, WebSocket upgrades (for databricks-codex), and includes security checks and log sanitization.
 
 ## Key Files
 
@@ -21,7 +21,8 @@ HTTP/WebSocket reverse proxy with two routes: inference (`/`) and OTEL (`/otel/`
 
 ### Working In This Directory
 - The `TokenSource` interface has a single method: `Token(ctx) (string, error)`. The root package's `TokenProvider` satisfies it.
-- **Two proxy routes**: `/` for inference (AI Gateway), `/otel/` for telemetry. Path algebra prepends the upstream's base path.
+- **Built-in routes**: `/` for inference (AI Gateway), `/otel/` for telemetry. Path algebra prepends the upstream's base path.
+- **Optional `Config.Routes`** (`UpstreamRoute` slice): registers additional path-prefix routes via `mux.Handle(PathPrefix+"/", ...)`. Each route shares the same `inferenceHandler` factory (token injection + WS detect + path-prepend) — only the upstream URL differs and a `StripPrefix` (defaults to `PathPrefix`) is removed from the incoming path before the existing prepend logic runs. `Routes: nil` is byte-identical to behavior before this field existed (sibling consumers `databricks-codex`, `databricks-cursor`, `databricks-opencode` rely on this).
 - **WebSocket support** exists for databricks-codex (Codex CLI), not for Claude Code (which uses HTTP+SSE). The `isWebSocketUpgrade` check is passive -- zero overhead for non-upgrade requests.
 - `FlushInterval: -1` on both reverse proxies enables streaming (SSE).
 - All routes are wrapped in `RecoveryHandler` for panic safety (returns HTTP 502).

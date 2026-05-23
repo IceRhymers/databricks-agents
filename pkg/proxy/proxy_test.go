@@ -1018,6 +1018,263 @@ func TestProxy_Daemon_EmptyOTELTables(t *testing.T) {
 	}
 }
 
+// --- Config.Routes (path-prefix multi-upstream) tests ---
+//
+// These cover #188: a single proxy port dispatching to multiple AI Gateway
+// upstreams via path-prefix routes (e.g. Anthropic on / + Gemini Native on
+// /v1beta). The route handler is a thin shim over inferenceHandler — strip
+// the local prefix, then let the existing prepend logic add the upstream
+// base path.
+
+// TestProxy_Routes_PathPrefixDispatch verifies that requests matching a
+// route's PathPrefix are forwarded to that route's upstream, and other
+// requests fall through to InferenceUpstream.
+func TestProxy_Routes_PathPrefixDispatch(t *testing.T) {
+	var routeHits, defaultHits int
+	routeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		routeHits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer routeUpstream.Close()
+
+	defaultUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defaultHits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer defaultUpstream.Close()
+
+	cfg := &Config{
+		InferenceUpstream: defaultUpstream.URL,
+		OTELUpstream:      defaultUpstream.URL,
+		TokenSource:       warmToken("tok"),
+		Routes: []UpstreamRoute{
+			{PathPrefix: "/v1beta", Upstream: routeUpstream.URL + "/ai-gateway/gemini/v1beta"},
+		},
+	}
+	handler, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	// Request matching route prefix → routed upstream.
+	req1 := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-pro:generateContent", nil)
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	if routeHits != 1 || defaultHits != 0 {
+		t.Errorf("after /v1beta request: routeHits=%d defaultHits=%d, want 1/0", routeHits, defaultHits)
+	}
+
+	// Request not matching route prefix → default upstream.
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if routeHits != 1 || defaultHits != 1 {
+		t.Errorf("after /v1/messages request: routeHits=%d defaultHits=%d, want 1/1", routeHits, defaultHits)
+	}
+}
+
+// TestProxy_Routes_TokenInjectionOnBothPaths verifies that the Bearer token
+// is injected on both the routed upstream and the default upstream — the
+// route handler shares inferenceHandler's token-injection codepath.
+func TestProxy_Routes_TokenInjectionOnBothPaths(t *testing.T) {
+	var routeAuth, defaultAuth string
+	routeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		routeAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer routeUpstream.Close()
+
+	defaultUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defaultAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer defaultUpstream.Close()
+
+	cfg := &Config{
+		InferenceUpstream: defaultUpstream.URL,
+		OTELUpstream:      defaultUpstream.URL,
+		TokenSource:       warmToken("shared-token"),
+		Routes: []UpstreamRoute{
+			{PathPrefix: "/v1beta", Upstream: routeUpstream.URL},
+		},
+	}
+	handler, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, httptest.NewRequest(http.MethodPost, "/v1beta/models/x", nil))
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
+
+	want := "Bearer shared-token"
+	if routeAuth != want {
+		t.Errorf("routed upstream Authorization = %q, want %q", routeAuth, want)
+	}
+	if defaultAuth != want {
+		t.Errorf("default upstream Authorization = %q, want %q", defaultAuth, want)
+	}
+}
+
+// TestProxy_Routes_StripsLocalPrefix is the prefix-collision regression pin.
+// It verifies the upstream sees the EXACT expected path string after
+// strip-then-prepend — not /v1beta/v1beta/... (double-prefix) and not just
+// /models/x (over-strip). The plan calls this out as the most likely place
+// to land a bug.
+func TestProxy_Routes_StripsLocalPrefix(t *testing.T) {
+	var gotPath string
+	routeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer routeUpstream.Close()
+
+	cfg := &Config{
+		InferenceUpstream: routeUpstream.URL,
+		OTELUpstream:      routeUpstream.URL,
+		TokenSource:       warmToken("tok"),
+		Routes: []UpstreamRoute{
+			{
+				PathPrefix: "/v1beta",
+				Upstream:   routeUpstream.URL + "/ai-gateway/gemini/v1beta",
+			},
+		},
+	}
+	handler, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-2.0-flash:generateContent", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	// Exact match — not strings.Contains, not HasPrefix. The whole point of
+	// this test is to pin the path algebra: incoming /v1beta/models/x with
+	// upstream /ai-gateway/gemini/v1beta and StripPrefix defaulted to
+	// PathPrefix should produce exactly this on the wire. A failure here
+	// likely means double-prefix (/ai-gateway/gemini/v1beta/v1beta/...) or
+	// over-strip (/ai-gateway/gemini/models/...).
+	want := "/ai-gateway/gemini/v1beta/models/gemini-2.0-flash:generateContent"
+	if gotPath != want {
+		t.Errorf("upstream saw path %q, want exactly %q", gotPath, want)
+	}
+}
+
+// TestProxy_Routes_EmptyRoutesIsBackwardCompatible regression-pins the
+// sibling-consumer guarantee: with Routes nil, NewServer's behavior is
+// byte-identical to its behavior before this field existed. databricks-codex
+// / databricks-cursor / databricks-opencode all leave Routes unset.
+func TestProxy_Routes_EmptyRoutesIsBackwardCompatible(t *testing.T) {
+	var gotPath, gotAuth, gotCodingHeader string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotCodingHeader = r.Header.Get("x-databricks-use-coding-agent-mode")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	cfg := &Config{
+		InferenceUpstream: upstream.URL + "/anthropic",
+		OTELUpstream:      upstream.URL,
+		UCMetricsTable:    "main.t.m",
+		UCLogsTable:       "main.t.l",
+		TokenSource:       warmToken("tok"),
+		// Routes intentionally unset (nil) — backward-compat path.
+	}
+	handler, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	// These three assertions mirror the load-bearing observable behavior
+	// of the existing TestProxy_PathAlgebra_Inference + TestProxy_InjectsAuthHeader
+	// + TestProxy_InjectsCustomHeaders tests. If any of them changes when
+	// Routes is nil, sibling consumers break.
+	if gotPath != "/anthropic/v1/messages" {
+		t.Errorf("path: got %q, want %q", gotPath, "/anthropic/v1/messages")
+	}
+	if gotAuth != "Bearer tok" {
+		t.Errorf("auth: got %q, want %q", gotAuth, "Bearer tok")
+	}
+	if gotCodingHeader != "true" {
+		t.Errorf("x-databricks-use-coding-agent-mode: got %q, want %q", gotCodingHeader, "true")
+	}
+}
+
+// TestProxy_Routes_OrderIndependent verifies that registering two routes in
+// either order produces the same dispatch — http.ServeMux matches the
+// longest-prefix regardless of registration order. The plan calls this out
+// as a guard against any future implementation that smuggles in registration
+// order as an implicit precedence signal (e.g. switching to a slice scan).
+func TestProxy_Routes_OrderIndependent(t *testing.T) {
+	for _, order := range []struct {
+		name   string
+		routes []string // PathPrefixes in registration order
+	}{
+		{"a-then-b", []string{"/alpha", "/beta"}},
+		{"b-then-a", []string{"/beta", "/alpha"}},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			var alphaHits, betaHits, defaultHits int
+			alphaUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				alphaHits++
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer alphaUpstream.Close()
+			betaUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				betaHits++
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer betaUpstream.Close()
+			defaultUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defaultHits++
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer defaultUpstream.Close()
+
+			urlByPrefix := map[string]string{
+				"/alpha": alphaUpstream.URL,
+				"/beta":  betaUpstream.URL,
+			}
+			var routes []UpstreamRoute
+			for _, p := range order.routes {
+				routes = append(routes, UpstreamRoute{PathPrefix: p, Upstream: urlByPrefix[p]})
+			}
+
+			cfg := &Config{
+				InferenceUpstream: defaultUpstream.URL,
+				OTELUpstream:      defaultUpstream.URL,
+				TokenSource:       warmToken("tok"),
+				Routes:            routes,
+			}
+			handler, err := NewServer(cfg)
+			if err != nil {
+				t.Fatalf("NewServer: %v", err)
+			}
+
+			// Three requests: one for each route + one default.
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/alpha/x", nil))
+			rec = httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/beta/y", nil))
+			rec = httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/default/z", nil))
+
+			if alphaHits != 1 || betaHits != 1 || defaultHits != 1 {
+				t.Errorf("registration order %v: alpha=%d beta=%d default=%d, want 1/1/1",
+					order.routes, alphaHits, betaHits, defaultHits)
+			}
+		})
+	}
+}
+
 // expiringTokenSource implements TokenSource and tokenExpirer for testing
 // the token_valid_until field in /health.
 type expiringTokenSource struct {
