@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0](https://github.com/IceRhymers/databricks-claude/compare/v1.0.2...v1.1.0) (2026-05-23)
+
+
+### Features
+
+* **proxy:** add path-prefix multi-upstream routing to pkg/proxy ([b0f1279](https://github.com/IceRhymers/databricks-claude/commit/b0f1279f6ebb68eb1332aab250485a400e3e4f45))
+* **proxy:** add path-prefix multi-upstream routing to pkg/proxy ([3bb18ea](https://github.com/IceRhymers/databricks-claude/commit/3bb18ea92d7a24c2bdbd6595731acba7e18e8049)), closes [#188](https://github.com/IceRhymers/databricks-claude/issues/188)
+
 ## [1.0.2](https://github.com/IceRhymers/databricks-claude/compare/v1.0.1...v1.0.2) (2026-05-18)
 
 
