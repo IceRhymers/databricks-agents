@@ -91,6 +91,13 @@ type Config struct {
 	// inference requests are forwarded byte-identically and this struct
 	// has no effect — see pkg/proxy/websearch_handler.go.
 	WebSearch WebSearchSettings
+	// ResponsesRewrite (--with-responses-rewrite, or enabled by sibling
+	// consumers like databricks-opencode) gates the OpenAI Responses-API SSE
+	// id-reconciliation rewriter. When Enabled is false, inference responses
+	// are forwarded byte-identically and this struct has no effect — see
+	// pkg/proxy/responses_rewriter.go. Claude Code never targets /responses,
+	// so leaving this false is byte-identical to prior behavior.
+	ResponsesRewrite ResponsesRewriteSettings
 	// Daemon, when true, indicates this proxy is running as a long-lived daemon
 	// (databricks-claude serve). The /health response includes daemon-specific
 	// fields; /shutdown is not registered (serve.go never wraps with lifecycle).
