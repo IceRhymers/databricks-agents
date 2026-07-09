@@ -14,26 +14,39 @@ const anthropicMessagesAPIType = "anthropic/v1/messages"
 // wire FQN sent to the gateway.
 const oneMSuffix = "[1m]"
 
-// destPattern matches the claude-(opus|sonnet|haiku)-major-minor shape within a
-// routing destination FQN. The leading (?:^|[./_-]) boundary ensures "claude-"
-// begins a name segment, so an unrelated substring like
-// "notclaude-opus-2025-01" is NOT misclassified as opus at version 2025 (which
-// would otherwise dominate the numeric version sort and mis-route the family).
-var destPattern = regexp.MustCompile(`(?:^|[./_-])claude-(opus|sonnet|haiku)-(\d+)-(\d+)`)
+// destPattern matches the claude-(opus|sonnet|haiku)-major[-minor] shape within
+// a routing destination FQN.
+//
+// The leading (?:^|[./_-]) boundary ensures "claude-" begins a name segment, so
+// an unrelated substring like "notclaude-opus-2025-01" is NOT misclassified as
+// opus at version 2025 (which would otherwise dominate the numeric version sort
+// and mis-route the family).
+//
+// The minor component is OPTIONAL because Databricks ships major-only
+// destinations: system.ai.databricks-claude-sonnet-5 and
+// ...-claude-sonnet-4 both exist and serve traffic. Requiring major-minor made
+// the parser silently drop them, so a workspace with sonnet-5 resolved to the
+// older sonnet-4-6. A missing minor is treated as .0 (5 => 5.0 > 4.6).
+//
+// The trailing (?:[^0-9]|$) boundary keeps the greedy minor group from taking
+// only part of a digit run.
+var destPattern = regexp.MustCompile(`(?:^|[./_-])claude-(opus|sonnet|haiku)-(\d+)(?:-(\d+))?(?:[^0-9]|$)`)
 
 // families is the fixed set of Claude families, in resolution order.
 var families = []string{"opus", "sonnet", "haiku"}
 
 // parseDestination parses a routing destination FQN into a Dest. It never
-// panics: if name does not match the claude-(opus|sonnet|haiku)-major-minor
-// shape it returns a Dest with Parsed false and an empty Family.
+// panics: if name does not match the claude-(opus|sonnet|haiku)-major[-minor]
+// shape it returns a Dest with Parsed false and an empty Family. An absent minor
+// component is treated as 0.
 func parseDestination(name string) Dest {
 	m := destPattern.FindStringSubmatch(name)
 	if m == nil {
 		return Dest{FQN: name, Parsed: false}
 	}
 	// The pattern guarantees m[2] and m[3] are digit runs, so Atoi cannot fail
-	// under normal input; ignore the error defensively.
+	// under normal input; ignore the error defensively. m[3] is "" when the
+	// destination carries a major-only version (e.g. claude-sonnet-5).
 	major, _ := strconv.Atoi(m[2])
 	minor, _ := strconv.Atoi(m[3])
 	return Dest{

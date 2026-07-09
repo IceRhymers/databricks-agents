@@ -39,10 +39,12 @@ func writeList(t *testing.T, w http.ResponseWriter, services []wireService, next
 	}
 }
 
+// wsvc builds a wire service in the REAL API shape: the resource name carries
+// the "model-services/" prefix and routing lives under `config`.
 func wsvc(fqn string, apiTypes []string, destFQNs ...string) wireService {
-	w := wireService{FullName: fqn, SupportedAPITypes: apiTypes}
+	w := wireService{Name: resourcePrefix + fqn, SupportedAPITypes: apiTypes}
 	for _, d := range destFQNs {
-		w.Routing.Destinations = append(w.Routing.Destinations, wireDest{Name: d})
+		w.Config.Routing.Destinations = append(w.Config.Routing.Destinations, wireDest{Name: d})
 	}
 	return w
 }
@@ -61,7 +63,10 @@ func TestParseDestination(t *testing.T) {
 		{"opus", "system.ai.databricks-claude-opus-4-8", "opus", 4, 8, true},
 		{"sonnet", "system.ai.databricks-claude-sonnet-4-6", "sonnet", 4, 6, true},
 		{"double-digit-minor", "x-claude-opus-4-10", "opus", 4, 10, true},
-		{"missing-minor", "system.ai.databricks-claude-opus-4", "", 0, 0, false},
+		// Major-only versions are REAL: system.ai.databricks-claude-sonnet-5 and
+		// ...-claude-sonnet-4 both exist and serve traffic. An absent minor is .0.
+		{"major-only", "system.ai.databricks-claude-opus-4", "opus", 4, 0, true},
+		{"major-only-sonnet-5", "system.ai.databricks-claude-sonnet-5", "sonnet", 5, 0, true},
 		{"garbage-suffix", "system.ai.databricks-claude-opusX", "", 0, 0, false},
 		{"unknown-family", "system.ai.databricks-claude-turbo-4-8", "", 0, 0, false},
 		// "claude-" must begin a name segment: an unrelated substring like
@@ -132,8 +137,10 @@ func TestResolve(t *testing.T) {
 	})
 
 	t.Run("unparseable destination -> service excluded, no panic", func(t *testing.T) {
+		// NOTE: "...-claude-opus-4" is NOT unparseable — major-only versions are
+		// real (claude-sonnet-5). Use destinations with no version at all.
 		services := []Service{
-			svc("workspace.default.broken", messages, "system.ai.databricks-claude-opus-4"),
+			svc("workspace.default.broken", messages, "system.ai.databricks-claude-opus"),
 			svc("workspace.default.brokenX", messages, "system.ai.databricks-claude-opusX"),
 		}
 		set, un := Resolve(services, Pins{})

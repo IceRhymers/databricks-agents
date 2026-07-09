@@ -55,20 +55,36 @@ func NewClient() *http.Client {
 	}
 }
 
-// wireDest mirrors a single routing.destinations[] entry on the wire.
+// resourcePrefix is the collection prefix the API stamps on every
+// model-service resource name ("model-services/system.ai.claude-opus-4-8").
+// It is NOT part of the Unity Catalog name: the gateway rejects a model id that
+// carries it ("Invalid Unity Catalog name"), so it is stripped on the way in.
+const resourcePrefix = "model-services/"
+
+// wireDest mirrors a single routing destination entry on the wire.
 type wireDest struct {
-	Name string `json:"name"`
+	Name      string `json:"name"`
+	IsDeleted bool   `json:"is_deleted"`
 }
 
 // wireService mirrors a model-service object on the wire, used for both LIST
 // entries and the individual GET response.
+//
+// The resource name arrives as `name` ("model-services/{catalog}.{schema}.{svc}").
+// `full_name` is accepted as a fallback for forward/backward compatibility.
 type wireService struct {
-	FullName          string      `json:"full_name"`
-	SupportedAPITypes []string    `json:"supported_api_types"`
-	Routing           wireRouting `json:"routing"`
+	Name              string     `json:"name"`
+	FullName          string     `json:"full_name"`
+	SupportedAPITypes []string   `json:"supported_api_types"`
+	Config            wireConfig `json:"config"`
 }
 
-// wireRouting mirrors the routing block of a model-service.
+// wireConfig mirrors the config block; routing lives under it.
+type wireConfig struct {
+	Routing wireRouting `json:"routing"`
+}
+
+// wireRouting mirrors the routing block of a model-service config.
 type wireRouting struct {
 	Destinations []wireDest `json:"destinations"`
 }
@@ -79,15 +95,32 @@ type wireListResponse struct {
 	NextPageToken string        `json:"next_page_token"`
 }
 
+// fqn returns the Unity Catalog name of the service, with the API's
+// "model-services/" resource prefix stripped.
+func (w wireService) fqn() string {
+	name := w.Name
+	if name == "" {
+		name = w.FullName
+	}
+	return strings.TrimPrefix(name, resourcePrefix)
+}
+
 // toService converts a wire representation into the exported Service, computing
-// the catalog and parsing every routing destination.
+// the catalog and parsing every live routing destination. Deleted destinations
+// are ignored — they no longer describe where traffic goes, so letting one
+// participate in family classification could make a service look ambiguous or
+// pin it to a retired version.
 func (w wireService) toService() Service {
+	fqn := w.fqn()
 	svc := Service{
-		FQN:               w.FullName,
-		Catalog:           catalogOf(w.FullName),
+		FQN:               fqn,
+		Catalog:           catalogOf(fqn),
 		SupportedAPITypes: w.SupportedAPITypes,
 	}
-	for _, d := range w.Routing.Destinations {
+	for _, d := range w.Config.Routing.Destinations {
+		if d.IsDeleted {
+			continue
+		}
 		svc.Destinations = append(svc.Destinations, parseDestination(d.Name))
 	}
 	return svc
@@ -153,6 +186,11 @@ func ListServices(ctx context.Context, client *http.Client, host, token string) 
 // wrapped around ErrForbidden so callers can skip the service; other non-2xx
 // responses yield an error including the status code.
 func GetService(ctx context.Context, client *http.Client, host, token, fqn string) (Service, error) {
+	// An empty FQN would request the collection endpoint with a trailing slash
+	// and 404. Fail with a name rather than a confusing status code.
+	if fqn == "" {
+		return Service{}, fmt.Errorf("model-services: GetService requires a non-empty fqn")
+	}
 	// fqn comes verbatim from the LIST response — escape it as a single path
 	// segment so a crafted service name cannot traverse to another API path.
 	url := fmt.Sprintf("%s%s/%s", strings.TrimRight(host, "/"), modelServicesPath, neturl.PathEscape(fqn))
@@ -197,34 +235,61 @@ func doGet(ctx context.Context, client *http.Client, url, token string) ([]byte,
 	return body, nil
 }
 
-// Discover lists model-services, enriches any LIST entry that lacks
-// supported_api_types via an individual GetService call, and resolves the
-// newest model per family. A GetService that returns ErrForbidden causes that
+// needsEnrichment reports whether an individual GetService is required to make a
+// LIST entry resolvable.
+//
+// The LIST endpoint omits routing.destinations for EVERY service and omits
+// supported_api_types for user-deployed ones, so a LIST entry alone can never be
+// classified into a family. Anything that is anthropic-capable — or whose
+// capability is still unknown — must be fetched individually.
+//
+// A service with a KNOWN, non-anthropic capability is skipped: it can never be a
+// candidate, so paying for a GET would be wasted (the metastore lists dozens of
+// gpt/gemini/qwen services).
+func needsEnrichment(svc Service) bool {
+	if len(svc.SupportedAPITypes) > 0 && !svc.supportsMessages() {
+		return false
+	}
+	return len(svc.Destinations) == 0 || len(svc.SupportedAPITypes) == 0
+}
+
+// listEnriched lists model-services and fills in the fields the LIST endpoint
+// omits (supported_api_types, routing.destinations) with an individual
+// GetService per candidate. A GetService that returns ErrForbidden causes that
 // service to be skipped with a logged note; any other GetService error is
 // propagated. A ListServices failure is returned directly.
-func Discover(ctx context.Context, client *http.Client, host, token string, pins Pins) (ModelSet, []Unresolved, error) {
+func listEnriched(ctx context.Context, client *http.Client, host, token string) ([]Service, error) {
 	services, err := ListServices(ctx, client, host, token)
 	if err != nil {
-		return ModelSet{}, nil, err
+		return nil, err
 	}
 
 	enriched := make([]Service, 0, len(services))
 	for _, svc := range services {
-		if len(svc.SupportedAPITypes) == 0 {
-			full, gerr := GetService(ctx, client, host, token, svc.FQN)
-			if gerr != nil {
-				if errors.Is(gerr, ErrForbidden) {
-					log.Printf("modeldiscovery: skipping service %q: %v", svc.FQN, gerr)
-					continue
-				}
-				return ModelSet{}, nil, gerr
-			}
-			enriched = append(enriched, full)
+		if !needsEnrichment(svc) {
+			enriched = append(enriched, svc)
 			continue
 		}
-		enriched = append(enriched, svc)
+		full, gerr := GetService(ctx, client, host, token, svc.FQN)
+		if gerr != nil {
+			if errors.Is(gerr, ErrForbidden) {
+				log.Printf("modeldiscovery: skipping service %q: %v", svc.FQN, gerr)
+				continue
+			}
+			return nil, gerr
+		}
+		enriched = append(enriched, full)
 	}
+	return enriched, nil
+}
 
+// Discover lists model-services, enriches each candidate via an individual
+// GetService call, and resolves the newest model per family.
+func Discover(ctx context.Context, client *http.Client, host, token string, pins Pins) (ModelSet, []Unresolved, error) {
+	enriched, err := listEnriched(ctx, client, host, token)
+	if err != nil {
+		return ModelSet{}, nil, err
+	}
 	set, unresolved := Resolve(enriched, pins)
 	return set, unresolved, nil
 }

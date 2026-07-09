@@ -2,8 +2,6 @@ package modeldiscovery
 
 import (
 	"context"
-	"errors"
-	"log"
 	"net/http"
 	"sort"
 )
@@ -66,33 +64,13 @@ func ListAnthropicModels(services []Service) []Model {
 	return models
 }
 
-// DiscoverModels lists model-services, enriches any LIST entry that lacks
-// supported_api_types via an individual GetService call, and returns the picker
-// list. A GetService that returns ErrForbidden causes that service to be skipped
-// with a logged note; any other GetService error is propagated. A ListServices
-// failure is returned directly. Mirrors Discover's enrichment loop.
+// DiscoverModels lists model-services, enriches each candidate via an individual
+// GetService call, and returns the picker list. Shares listEnriched with
+// Discover so both entry points agree on the enrichment and skip semantics.
 func DiscoverModels(ctx context.Context, client *http.Client, host, token string) ([]Model, error) {
-	services, err := ListServices(ctx, client, host, token)
+	enriched, err := listEnriched(ctx, client, host, token)
 	if err != nil {
 		return nil, err
 	}
-
-	enriched := make([]Service, 0, len(services))
-	for _, svc := range services {
-		if len(svc.SupportedAPITypes) == 0 {
-			full, gerr := GetService(ctx, client, host, token, svc.FQN)
-			if gerr != nil {
-				if errors.Is(gerr, ErrForbidden) {
-					log.Printf("modeldiscovery: skipping service %q: %v", svc.FQN, gerr)
-					continue
-				}
-				return nil, gerr
-			}
-			enriched = append(enriched, full)
-			continue
-		}
-		enriched = append(enriched, svc)
-	}
-
 	return ListAnthropicModels(enriched), nil
 }
