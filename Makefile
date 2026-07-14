@@ -40,13 +40,13 @@ CERT_COUNTRY ?= US
 ## the Claude Desktop MDM artifacts expect — symlink on Unix, hard link on
 ## Windows).
 build:
-	go build -ldflags="$(LDFLAGS)" -o databricks-claude$(EXE) .
+	go build -ldflags="$(LDFLAGS)" -o databricks-claude$(EXE) ./cmd/databricks-claude
 	$(LINK_ALIAS)
 
 ## Install to GOPATH/bin (also drops the credential-helper alias so Claude
 ## Desktop's inferenceCredentialHelper can target a stable path).
 install:
-	go install -ldflags="$(LDFLAGS)" .
+	go install -ldflags="$(LDFLAGS)" ./cmd/databricks-claude
 	$(INSTALL_LINK_ALIAS)
 
 ## Run tests with verbose output
@@ -59,12 +59,12 @@ test:
 ## predictable system path.
 dist:
 	mkdir -p dist
-	GOOS=darwin  GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-darwin-arm64  .
-	GOOS=darwin  GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-darwin-amd64  .
-	GOOS=linux   GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-linux-amd64   .
-	GOOS=linux   GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-linux-arm64   .
-	GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-windows-amd64.exe .
-	GOOS=windows GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-windows-arm64.exe .
+	GOOS=darwin  GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-darwin-arm64  ./cmd/databricks-claude
+	GOOS=darwin  GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-darwin-amd64  ./cmd/databricks-claude
+	GOOS=linux   GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-linux-amd64   ./cmd/databricks-claude
+	GOOS=linux   GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-linux-arm64   ./cmd/databricks-claude
+	GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-windows-amd64.exe ./cmd/databricks-claude
+	GOOS=windows GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-windows-arm64.exe ./cmd/databricks-claude
 
 ## Build a universal2 macOS .pkg installer. Set APPLE_INTERNAL_SIGNING_IDENTITY
 ## to codesign the binary inside the pkg with hardened-runtime flags; otherwise
@@ -73,8 +73,8 @@ dist:
 pkg:
 	rm -rf build root scripts/postinstall dist/databricks-claude*.pkg
 	mkdir -p build dist scripts root/usr/local/bin
-	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-darwin-arm64 .
-	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-darwin-amd64 .
+	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-darwin-arm64 ./cmd/databricks-claude
+	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-darwin-amd64 ./cmd/databricks-claude
 	lipo -create -output build/databricks-claude dist/databricks-claude-darwin-arm64 dist/databricks-claude-darwin-amd64
 	@if [ -n "$$APPLE_INTERNAL_SIGNING_IDENTITY" ]; then \
 		echo "Signing binary with identity: $$APPLE_INTERNAL_SIGNING_IDENTITY"; \
