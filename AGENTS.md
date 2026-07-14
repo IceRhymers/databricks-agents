@@ -7,6 +7,8 @@ Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth t
 
 ## Key Files
 
+> All `*.go` source files listed below now live under `cmd/databricks-claude/` (the `main` package, relocated from the repo root in #197). `Makefile`, `go.mod`, `CLAUDE.md`, and `README.md` remain at the repo root. The Go module is `github.com/IceRhymers/databricks-agents`.
+
 | File | Description |
 |------|-------------|
 | `main.go` | CLI entry point: flag parsing, config resolution from `~/.claude/settings.json` and persistent config, token seeding, AI Gateway discovery, proxy startup, settings patching, child launch, and settings restore on exit |
@@ -45,7 +47,7 @@ Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth t
 | `serve_install_linux_test.go` | Linux systemd unit template rendering tests (build tag: `linux`) |
 | `serve_install_windows_test.go` | Windows schtasks `/TR` argument building tests (build tag: `windows`) |
 | `Makefile` | Build, install, test, cross-compile, lint targets |
-| `go.mod` | Module declaration (`github.com/IceRhymers/databricks-claude`, Go 1.22, zero deps) |
+| `go.mod` | Module declaration (`github.com/IceRhymers/databricks-agents`, Go 1.22, zero deps) |
 | `CLAUDE.md` | Project-level AI agent instructions |
 | `README.md` | User-facing documentation |
 
@@ -53,6 +55,10 @@ Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth t
 
 | Directory | Purpose |
 |-----------|---------|
+| `cmd/databricks-claude/` | CLI entry point (`main` package), relocated from the repo root in #197. Builds the `databricks-claude` binary. |
+| `internal/cmd/` | Pre-existing command-tree parsing/help/completion library (distinct from `cmd/databricks-claude/`) |
+| `internal/core/` | Placeholder for the unified core module surface (epic #196); empty `doc.go` skeleton added in #197 |
+| `internal/profile/` | Placeholder for profile resolution (epic #196); empty `doc.go` skeleton added in #197 |
 | `pkg/` | Reusable library packages extracted from the monolithic main (see `pkg/AGENTS.md`) |
 | `pkg/mdmprofile/` | Platform-specific readers for MDM-managed preferences (darwin: plist, windows: registry, other: stub). Used by the credential helper to resolve the Databricks profile on endpoint machines. |
 | `.github/` | GitHub Actions CI configuration (see `.github/AGENTS.md`) |
@@ -62,7 +68,7 @@ Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth t
 
 ### Working In This Directory
 - **Zero external dependencies** -- do not add any third-party imports. All code must use the Go stdlib only.
-- The root package is `main`. The six `.go` files here are thin facades that delegate to `pkg/` sub-packages. Keep them thin.
+- The CLI entry-point package is `main`, located at `cmd/databricks-claude/`. The `.go` files there are thin facades that delegate to `pkg/` sub-packages. Keep them thin.
 - `main.go` owns flag parsing and orchestration flow. `process.go` owns settings.json lifecycle. `token.go` owns Databricks auth. `proxy.go` owns HTTP proxy wiring.
 - `lock.go` and `registry.go` are pure type-alias forwarding files -- they exist only for backward compatibility with root-level tests.
 

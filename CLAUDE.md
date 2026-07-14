@@ -9,20 +9,23 @@ Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth t
 ## Build & Test
 
 ```bash
-make build                       # produces ./databricks-claude
+make build                       # produces ./databricks-claude (builds ./cmd/databricks-claude)
 make test                        # go test ./... -v
 make lint                        # go vet ./...
 make install                     # installs to $GOPATH/bin
 make dist                        # cross-compile darwin/linux/windows amd64+arm64
+go build ./cmd/databricks-claude # build the CLI binary directly (module: github.com/IceRhymers/databricks-agents)
 go test -run TestParseArgs -v    # run a single test
 go test ./pkg/proxy/... -v       # test a single package
 ```
 
+The Go module is `github.com/IceRhymers/databricks-agents`. The CLI entry point (`main` package) lives at `cmd/databricks-claude/`; the built binary is still named `databricks-claude`.
+
 ## Architecture
 
-### Root package (`main`)
+### CLI entry-point package (`cmd/databricks-claude/`, package `main`)
 
-The root package is a set of `.go` files that act as thin facades wiring together `pkg/` sub-packages:
+The `main` package lives at `cmd/databricks-claude/` — a set of `.go` files that act as thin facades wiring together `pkg/` sub-packages (relocated from the repo root in #197):
 
 - **main.go** — CLI entry point: flag parsing, config resolution (`~/.claude/settings.json` + `~/.claude/.databricks-claude.json`), token seeding, AI Gateway auto-discovery, proxy startup, settings patching, child launch, and explicit settings restore before `os.Exit`. After #174 the session-scoped lifecycle (refcount, /shutdown, idle-timeout) lives in `serve_session.go`; main.go owns wrapper-mode (proxy + claude child) only. `databricksFullSetupEnv(m ModelRouting)` now takes a `ModelRouting` and omits a family's `ANTHROPIC_*_MODEL` key when its FQN is empty (no silent mis-route for an unresolved family). `defaultModelRouting()` is the demoted offline fallback (the former hardcoded model map); `launchModelRouting(s persistentState)` returns the persisted `ModelRouting` from state, filling any blank family from the fallback — used only by launch-path callers, which never call `pkg/modeldiscovery` themselves.
 - **proxy.go** — Facade over `pkg/proxy`: defines `ProxyConfig`, wires `NewProxyServer` and `StartProxy`.
@@ -65,6 +68,14 @@ Each package is independently importable with no cross-dependencies:
 | `pkg/state` | JSON-file state persistence helpers (atomic temp-file + rename) |
 | `pkg/tokencache` | Mutex-guarded token cache with 5-min refresh buffer and fallback-on-error |
 | `pkg/updater` | GitHub release checker with 24-hour cache and numeric semver comparison |
+
+### Internal packages (`internal/`)
+
+| Package | Purpose |
+|---------|---------|
+| `internal/cmd` | Pre-existing command-tree parsing/help/completion library (distinct from `cmd/databricks-claude/`; drives `rootCommand` in `commands.go`). |
+| `internal/core` | Placeholder for the unified core module surface (epic #196). Empty `doc.go` skeleton added in #197. |
+| `internal/profile` | Placeholder for profile resolution (epic #196). Empty `doc.go` skeleton added in #197. |
 
 ### Key data flow
 

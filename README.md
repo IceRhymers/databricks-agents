@@ -38,7 +38,7 @@ Download the latest release from the [releases page](https://github.com/IceRhyme
 ### From source
 
 ```bash
-go install github.com/IceRhymers/databricks-claude@latest
+go install github.com/IceRhymers/databricks-agents/cmd/databricks-claude@latest
 ```
 
 ## Pick Your Setup
@@ -992,7 +992,7 @@ Completers are emitted as shell functions embedded in the generated script — n
 **Integrating in another binary** — import `pkg/completion`, define your own `[]FlagDef`, and add the early-exit check to `main()`:
 
 ```go
-import "github.com/IceRhymers/databricks-claude/pkg/completion"
+import "github.com/IceRhymers/databricks-agents/pkg/completion"
 
 var flagDefs = []completion.FlagDef{ /* ... */ }
 
