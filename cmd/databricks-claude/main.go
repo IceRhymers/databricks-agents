@@ -23,6 +23,7 @@ import (
 	"github.com/IceRhymers/databricks-agents/internal/core/proxy"
 	"github.com/IceRhymers/databricks-agents/internal/core/refcount"
 	"github.com/IceRhymers/databricks-agents/internal/core/updater"
+	"github.com/IceRhymers/databricks-agents/internal/profile"
 	"github.com/IceRhymers/databricks-agents/pkg/mdmprofile"
 	"github.com/IceRhymers/databricks-agents/pkg/websearch"
 )
@@ -547,7 +548,12 @@ func main() {
 		}
 	}
 
-	if err := bootstrapSettings(a.Port, resolvedProfile, proxyURL, otelEnv); err != nil {
+	if err := ClaudeProfile().PatchSettings.Patch(profile.PatchRequest{
+		PortFlag:    a.Port,
+		ProfileName: resolvedProfile,
+		ProxyURL:    proxyURL,
+		Env:         otelEnv,
+	}); err != nil {
 		log.Fatalf("databricks-claude: %v", err)
 	}
 
