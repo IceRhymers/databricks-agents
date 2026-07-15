@@ -4,22 +4,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth tokens via the Databricks CLI. Zero external Go dependencies — pure stdlib only.
+A monorepo of transparent proxy wrappers that auto-refresh Databricks OAuth tokens via the Databricks CLI, so Databricks-hosted models can be used with unmodified AI coding CLIs. It hosts two launchers today:
+
+- **`databricks-claude`** — wraps Claude Code. Patches `~/.claude/settings.json`'s env block; gateway `{host}/ai-gateway/anthropic`.
+- **`databricks-codex`** — wraps the OpenAI Codex CLI. Surgically patches `~/.codex/config.toml` every session (no settings.json-style env block); gateway `{host}/ai-gateway/openai/v1`.
+
+Both share the tool-agnostic engine in `internal/core/` (proxy, auth, token cache, child process, state, lifecycle) via the `internal/profile.Profile` abstraction; each launcher is its own `package main` under `cmd/`. Zero external Go dependencies — pure stdlib only.
 
 ## Build & Test
 
 ```bash
-make build                       # produces ./databricks-claude (builds ./cmd/databricks-claude)
+make build                       # produces ./databricks-claude and ./databricks-codex
 make test                        # go test ./... -v
 make lint                        # go vet ./...
-make install                     # installs to $GOPATH/bin
-make dist                        # cross-compile darwin/linux/windows amd64+arm64
-go build ./cmd/databricks-claude # build the CLI binary directly (module: github.com/IceRhymers/databricks-agents)
+make install                     # installs both to $GOPATH/bin
+make dist                        # cross-compile darwin/linux/windows amd64+arm64, both binaries
+go build ./cmd/databricks-claude # build the claude CLI binary directly (module: github.com/IceRhymers/databricks-agents)
+go build ./cmd/databricks-codex  # build the codex CLI binary directly
 go test -run TestParseArgs -v    # run a single test
-go test ./internal/core/proxy/... -v  # test a single package
+go test ./internal/core/proxy/... -v       # test a single package
+go test ./internal/codex/tomlconfig/... -v # test the codex config.toml patcher
 ```
 
-The Go module is `github.com/IceRhymers/databricks-agents`. The CLI entry point (`main` package) lives at `cmd/databricks-claude/`; the built binary is still named `databricks-claude`.
+The Go module is `github.com/IceRhymers/databricks-agents`. Each launcher's `main` package lives at `cmd/<binary-name>/`; the built binaries are named `databricks-claude` and `databricks-codex`. `databricks-codex` has no credential-helper alias, no `.pkg`/MDM/trust-profile surface, and no daemon — see the codex architecture section below for what's intentionally smaller than claude's.
 
 ## Architecture
 
@@ -51,6 +58,23 @@ The `main` package lives at `cmd/databricks-claude/` — a set of `.go` files th
 - **serve_install_other.go** — `//go:build !darwin && !windows && !linux` — stubs returning "unsupported platform" error for `installDaemon`/`uninstallDaemon`/`daemonStatus`, plus a `("", nil)` `diagnosticsTail` so cross-platform CI builds (freebsd/openbsd) compile.
 - **profile_claude.go** — The claude implementation of the `internal/profile` abstraction (#199). Lives in `package main` because a launcher can't be imported. Defines `const ProfileName = "databricks-claude"` and three tiny delegating adapters: `claudeSettingsPatcher` (`.Patch` → one-line `bootstrapSettings`; `.Restore` → unwired no-op scoped to #E), `claudeDaemon` (`.Install`/`.Uninstall`/`.Status`/`.Diagnostics` → `installDaemon`/`uninstallDaemon`/`daemonStatus`/`diagnosticsTail`, mapping all 8 `installOptions` fields in and all 11 `statusResult` fields out via `toDaemonStatus`/`fromDaemonStatus`), and `claudeHooks` (`.Install`/`.Uninstall` → `installHooks`/`uninstallHooks(claudeSettingsPath())`). `ClaudeProfile()` is the typed constructor the 3 live call sites (`main.go` settings patch, `hooks_cmd.go` hook install/uninstall, `serve_install.go` daemon leaf calls) route through. `claudeSettingsPath()` centralizes the `~/.claude/settings.json` path.
 
+### CLI entry-point package (`cmd/databricks-codex/`, package `main`)
+
+`databricks-codex` wraps the OpenAI Codex CLI, mirroring claude's thin-`main`-over-`core.Run` shape (#201) but with a smaller surface: no settings.json-style env block, no daemon, no Desktop/MDM artifacts. Its "settings file" is `~/.codex/config.toml`, surgically patched every session (not a one-shot bootstrap):
+
+- **main.go** — Thin CLI entry point: early-exit subcommand dispatch (completion/hooks/config/serve/update), `parseArgs`, help/version, then `plan, patcher, err := buildCodexLaunchPlan(a); os.Exit(core.Run(CodexProfile(patcher), plan, a.CodexArgs))`. Hosts shared package-`main` helpers: `parseArgs`, `handleHelp`, `handlePrintEnv`, `buildUpdaterConfig`, `defaultModel`/`resolveModel`, `resolveProfile`, `resolveOtel` (state-only — no session-time OTEL flags), `deriveLogsTable`.
+- **launch_codex.go** — `buildCodexLaunchPlan(a *Args) (core.LaunchPlan, codexSettingsPatcher, error)`: codex-specific wrapper pre-flight — logging setup, profile/model resolution with state persistence, `authcheck.EnsureAuthenticated`, port resolution, TLS validation, startup security warnings, token seeding, host discovery, gateway URL construction (`{host}/ai-gateway/openai/v1`), OTEL table resolution (metrics + logs only — codex has no traces signal), and the `exec.LookPath("codex")` guard (positioned after host discovery so auth/discovery errors surface first; excluded from `serve` and from `core.Run`, which launches `ChildBinary` blindly). Returns the neutral `core.LaunchPlan` (`BuildEnv: nil` — codex writes no env block) plus the field-bearing `codexSettingsPatcher` it constructed, so the launch-time model/OTEL values it resolved are single-sourced into both the proxy headers and the config.toml patch (avoiding parity drift between them).
+- **profile_codex.go** — The codex implementation of the `internal/profile` abstraction. `codexSettingsPatcher{mgr, model, modelExplicit, otelMetricsTable, otelLogsTable, otelEnabled}` implements `SettingsPatcher`: `.Patch` computes `base_url` + the OTEL exporter endpoints (`{proxyURL}/otel/v1/{logs,metrics}`, emitted only when OTEL is enabled and the corresponding table is non-empty) from `req.ProxyURL` and delegates to `tomlconfig.Manager.Patch` — the *same* writer `serve_codex.go` calls, so wrapper-mode and `serve` emit byte-identical config.toml for identical inputs. The zero-value patcher is a valid `SettingsPatcher` (satisfies the compile-time conformance assert and Registry/test usage); the launch path always supplies a field-bearing value. `codexDaemon` is an **inert** API-shape conformance struct — codex has no daemon, so `Install`/`Uninstall` return `profile.ErrDaemonUnsupported` and `Status`/`Diagnostics` return zero values; never invoked at runtime. `codexHooks` delegates to `installHooks`/`uninstallHooks(codexHooksPath())` against `~/.codex/hooks.json`. `CodexProfile(patcher profile.SettingsPatcher) profile.Profile` is a one-arg factory (Option A — the launch-time-static model/OTEL fields live on the patcher, not threaded through `PatchRequest`, since `PatchRequest.Env` is contractually "the settings.json env block" and codex writes none).
+- **serve_codex.go** — `serve` subcommand: codex's session/headless sibling entrypoint. Unlike claude, codex has **no daemon** (no LaunchAgent/systemd/schtasks equivalent) — `serve` is a leaf with no `install`/`uninstall`/`status` sub-subcommands. It does NOT route through `core.Run` (distinct lifecycle: `internal/core/lifecycle` wrap + idle timeout, no child process, no `LookPath("codex")` guard since it never launches codex) but **does** call the exact same `codexSettingsPatcher.Patch` config.toml writer as wrapper mode via `profile2Request(proxyURL)`, guaranteeing byte-identical config.toml from either entrypoint.
+- **hooks.go** — `installHooks`/`uninstallHooks` manage the SessionStart entry in `~/.codex/hooks.json` (Codex has no SessionEnd event, so there's no release hook — the proxy self-exits via idle timeout) and flip `[features] hooks = true` in `config.toml` so Codex actually reads `hooks.json`. `ensureHooksFeatureFlag`/`removeHooksFeatureFlag` write `config.toml` directly, bypassing `tomlconfig.Manager`'s backup/restore bookkeeping — a documented TOCTOU carried forward unchanged from the standalone repo (`TODO(#72 follow-up)`), not fixed here to preserve byte-parity. `headlessEnsure`/`headlessEnsureConfig` (called by `hooks session-start`) spawn `databricks-codex serve --port=N` via `headless.Config.EnsureCommand=["serve"]`.
+- **hooks_cmd.go** — `hooks <install|uninstall|session-start>` subcommand dispatcher; thin wrappers around `hooks.go`.
+- **cli_config.go** — `config <otel|show>` subcommand runner. Smaller surface than claude's: no `config write` (codex has no settings.json bootstrap — config.toml is patched every session by the proxy lifecycle, not a one-shot writer) and no `config websearch` (codex has no local web-search fulfillment). `resolveConfigOTEL` is the pure orchestration resolver (mirrors claude's `resolveConfigOTEL` pattern); `config otel disable` preserves state-file table preferences so a later `enable` restores them without re-typing.
+- **state.go** — `persistentState` for `~/.codex/.databricks-codex.json` (profile, model, port, TLS paths, OTEL tables, and `OtelMetricsDisabled`/`OtelLogsDisabled` sticky bits — codex's two-store equivalent of claude's settings-json-absence-means-off model, adapted because codex has no env block to absent).
+- **token.go** — `NewTokenProvider`/`DiscoverHost`/`ConstructGatewayURL` (gateway path `/ai-gateway/openai/v1`, distinct from claude's `/ai-gateway/anthropic`). Same `databricks auth token`/`auth env` shelling pattern as claude's `token.go`.
+- **proxy.go** — Thin facade over `internal/core/proxy` (`ProxyConfig`, `NewProxyServer`, `ServeProxy`, `StartProxy`), used by both `launch_codex.go` (indirectly via `core.Run`) and `serve_codex.go` (directly, since `serve` doesn't route through `core.Run`).
+- **commands.go** — Source-of-truth `rootCommand` tree (`config`, `hooks`, `serve` subcommands) driving parsing, help, and completion — same `internal/cmd` machinery claude uses.
+- **completion_flags.go** — `flagDefs`/`knownFlags`/`knownSubcommands`, derived from `rootCommand` the same way claude's are.
+
 ### Core packages (`internal/core/`)
 
 The tool-agnostic proxy/auth/gateway/token/state engine every launcher runs. Promoted from `pkg/` into module-private `internal/core` in #198 (no behavior change) — the `internal/` boundary is compiler-enforced, so only this module can import them:
@@ -61,7 +85,7 @@ The tool-agnostic proxy/auth/gateway/token/state engine every launcher runs. Pro
 | `internal/core/childproc` | Child process start, SIGINT/SIGTERM forwarding, exit code propagation |
 | `internal/core/cli` | Shared CLI helpers |
 | `internal/core/completion` | Shell completion script generation (bash, zsh, fish) from `FlagDef` slices |
-| `internal/core/headless` | Detached-proxy spawn helpers: `Ensure` (start-if-absent) and `Release` (refcount decrement). `Config.EnsureCommand` (added in #174) lets databricks-claude target `serve --session-mode` instead of the deleted `--headless` root flag; siblings (databricks-codex, databricks-opencode) leave it empty for the legacy `--headless` shape. |
+| `internal/core/headless` | Detached-proxy spawn helpers: `Ensure` (start-if-absent) and `Release` (refcount decrement). `Config.EnsureCommand` (added in #174) lets a launcher target its own subcommand instead of the legacy bare `--headless` flag shape: databricks-claude sets it to `["serve", "--session-mode"]`, databricks-codex to `["serve"]` (#201). |
 | `internal/core/health` | `/health` endpoint handler returning JSON with tool name, version, and PID |
 | `internal/core/lifecycle` | HTTP handler wrapper adding `/shutdown` refcount endpoint and idle timeout |
 | `internal/core/portbind` | Port binding helpers: bind to a configured port with fallback |
@@ -85,11 +109,14 @@ Only the Claude/Anthropic-coupled packages remain here after #198 — deliberate
 
 | Package | Purpose |
 |---------|---------|
-| `internal/cmd` | Pre-existing command-tree parsing/help/completion library (distinct from `cmd/databricks-claude/`; drives `rootCommand` in `commands.go`). |
+| `internal/cmd` | Pre-existing command-tree parsing/help/completion library (distinct from `cmd/databricks-claude/`; drives `rootCommand` in both launchers' `commands.go`). |
 | `internal/core` | The shared tool-agnostic engine (proxy/auth/gateway/token/state). Populated in #198 — see the Core packages table above. |
-| `internal/profile` | The per-tool `Profile` abstraction (#199): `Profile` struct (Name, ChildBinary, ConfigPath, GatewayPath + the three seams) plus the `SettingsPatcher` / `DaemonStrategy` / `HookInstaller` interfaces and their neutral, lossless request/response structs (`PatchRequest`, `RestoreRequest`, `DaemonInstallRequest` mirroring all 8 install fields, `DaemonStatus` mirroring all 11 status fields). `Registry` (Register/Lookup/Names) is an API-shape deliverable for the future multiplexer (#H) — no `var Default`, no `init()` registration, does NOT compose #H via init. Stdlib-only (imports `errors`/`sort`); interfaces live here, concrete impls live in each launcher's `package main` (claude: `profile_claude.go`). `ErrDaemonUnsupported` is a forward-looking sentinel unused by claude. |
+| `internal/profile` | The per-tool `Profile` abstraction (#199): `Profile` struct (Name, ChildBinary, ConfigPath, GatewayPath + the three seams) plus the `SettingsPatcher` / `DaemonStrategy` / `HookInstaller` interfaces and their neutral, lossless request/response structs (`PatchRequest`, `RestoreRequest`, `DaemonInstallRequest` mirroring all 8 install fields, `DaemonStatus` mirroring all 11 status fields). `Registry` (Register/Lookup/Names) is an API-shape deliverable for the future multiplexer (#H) — no `var Default`, no `init()` registration, does NOT compose #H via init. Stdlib-only (imports `errors`/`sort`); interfaces live here, concrete impls live in each launcher's `package main` (claude: `profile_claude.go`; codex: `profile_codex.go`). `ErrDaemonUnsupported` is used for real by `codexDaemon` (codex has no daemon) and is a forward-looking sentinel unused by claude. |
+| `internal/codex/tomlconfig` | codex-specific (not tool-agnostic like `internal/core`) string-based surgical patcher for `~/.codex/config.toml` — `Manager.Patch`/`Backup`/`Restore`/`RestoreFromBackup`/`UpdateProxyURL`. Lives under module-root `internal/` (not `pkg/`) so it's importable from `cmd/databricks-codex` (`package main`) while staying out of `internal/core` (claude has no equivalent — its settings file is a JSON env block, not TOML). Zero deps. See `internal/codex/tomlconfig/AGENTS.md`. |
 
 ### Key data flow
+
+**databricks-claude:**
 
 1. Wrapper mode: `main.go` → `buildClaudeLaunchPlan` (`launch_claude.go`) seeds the token cache and resolves upstreams into a neutral `core.LaunchPlan` → `core.Run` (`internal/core/run.go`) binds the proxy on the configured port (default `49153`) → assembles the env block via `plan.BuildEnv(proxyURL)` → patches `settings.json` (through `ClaudeProfile().PatchSettings.Patch`) to point `ANTHROPIC_BASE_URL` at the proxy → launches `claude` as child → releases the cross-session refcount on exit.
 2. Session-scoped standalone proxy: `serve --session-mode` (in `serve_session.go`) does the same setup but blocks on SIGINT/SIGTERM or `/shutdown` instead of launching claude. Handler is wrapped with `internal/core/lifecycle` (`POST /shutdown` refcount decrement + conditional exit; idle timeout defaults to 30m, resets on each proxied request).
@@ -97,14 +124,21 @@ Only the Claude/Anthropic-coupled packages remain here after #198 — deliberate
 4. Proxy intercepts every request, injects fresh OAuth token via `internal/core/tokencache` → forwards to AI Gateway (`{host}/ai-gateway/anthropic`) or Databricks OTEL endpoint.
 5. On exit, settings are restored **explicitly before `os.Exit`** (not via defer — `os.Exit` skips defers). `ANTHROPIC_BASE_URL` is handed off to a surviving session if one exists.
 
+**databricks-codex:**
+
+1. Wrapper mode: `main.go` → `buildCodexLaunchPlan` (`launch_codex.go`) seeds the token cache, resolves upstreams (gateway `{host}/ai-gateway/openai/v1`), and guards on `exec.LookPath("codex")` → returns a neutral `core.LaunchPlan` (`BuildEnv: nil`) plus a field-bearing `codexSettingsPatcher` → `core.Run` binds the proxy on the configured port (default `49154`) → patches `~/.codex/config.toml` (through `CodexProfile(patcher).PatchSettings.Patch`, computing `base_url` + OTEL exporter endpoints from the bound proxy URL) → launches `codex` as child → releases the cross-session refcount on exit.
+2. Session/headless proxy: `serve` (in `serve_codex.go`) does the same resolution but blocks on SIGINT/SIGTERM or `/shutdown` instead of launching codex, and calls the *same* `codexSettingsPatcher.Patch` writer directly (byte-identical config.toml from either entrypoint). No daemon mode exists — `serve` is codex's only headless lifecycle, with no `install`/`uninstall`/`status` sub-subcommands.
+3. Proxy intercepts every request, injects a fresh OAuth token → forwards to AI Gateway or the Databricks OTEL endpoint (metrics + logs only, no traces signal).
+4. SessionStart hooks (`~/.codex/hooks.json`, gated by `[features] hooks = true` in config.toml) spawn `databricks-codex serve --port=N` on demand; there is no SessionEnd hook (Codex CLI has no session-end event), so the proxy relies entirely on its idle timeout to exit.
+
 ## Key Design Constraints
 
 - **Zero external dependencies** — do not add third-party imports. Pure Go stdlib only.
-- **No breaking changes to settings.json** — a botched restore leaves the user's Claude config pointing at a dead proxy. Any change to key names, restore logic, or the save/restore lifecycle requires extreme care.
-- **Atomic file writes everywhere** — all JSON writes (settings, registry, persistent config) use temp-file + `os.Rename` in the same directory.
-- **Session handoff** — when multiple `databricks-claude` instances run concurrently, the exiting one hands `ANTHROPIC_BASE_URL` to the most recent survivor.
-- **OTEL key persistence** — when OTEL is active (state file has any `otel_*_table` set, or settings.json carries OTEL keys), OTEL keys survive settings restore (controlled by `otelKeysPersistent` flag).
-- **No model discovery on the launch hot path** — `pkg/modeldiscovery` network calls run only at `config write` / `desktop generate-config` / `doctor` time. The wrapper launch path (`buildClaudeLaunchPlan` in `launch_claude.go`, via `launchModelRouting`) and the unconditional `serve --session-mode` startup read the persisted `ModelRouting` from state (or fall back to `defaultModelRouting()`); they never call the gateway.
+- **No breaking changes to settings.json / config.toml** — a botched restore leaves the user's config pointing at a dead proxy. Any change to key names, restore logic, or the save/restore lifecycle requires extreme care, for both claude's `settings.json` env block and codex's `config.toml` surgical patch.
+- **Atomic file writes everywhere** — all JSON/TOML writes (settings, config.toml, registry, persistent config) use temp-file + `os.Rename` in the same directory.
+- **Session handoff** — when multiple instances of the same launcher run concurrently, the exiting one hands the base URL to the most recent survivor.
+- **OTEL key persistence** — when OTEL is active (state file has any `otel_*_table` set, or settings.json/config.toml carries OTEL keys), OTEL keys survive restore (controlled by `otelKeysPersistent` for claude; codex's `OtelMetricsDisabled`/`OtelLogsDisabled` sticky bits for codex).
+- **No model discovery on the launch hot path** — `pkg/modeldiscovery` (claude-only) network calls run only at `config write` / `desktop generate-config` / `doctor` time. The wrapper launch path (`buildClaudeLaunchPlan` in `launch_claude.go`, via `launchModelRouting`) and the unconditional `serve --session-mode` startup read the persisted `ModelRouting` from state (or fall back to `defaultModelRouting()`); they never call the gateway. codex has no equivalent discovery — its model is a flag/state value with a hardcoded `defaultModel()` fallback, no Unity Catalog lookup.
 
 ## Testing Patterns
 
