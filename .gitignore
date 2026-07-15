@@ -1,5 +1,6 @@
 /databricks-claude
 /databricks-claude-credential-helper
+/databricks-codex
 dist/
 *.exe
 .omc/

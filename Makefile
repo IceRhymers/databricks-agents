@@ -38,16 +38,20 @@ CERT_COUNTRY ?= US
 
 ## Build the databricks-claude binary (and the credential-helper alias that
 ## the Claude Desktop MDM artifacts expect — symlink on Unix, hard link on
-## Windows).
+## Windows) plus the databricks-codex binary. codex has no credential-helper
+## surface, so it gets a plain `go build` with no alias step.
 build:
 	go build -ldflags="$(LDFLAGS)" -o databricks-claude$(EXE) ./cmd/databricks-claude
 	$(LINK_ALIAS)
+	go build -ldflags="$(LDFLAGS)" -o databricks-codex$(EXE) ./cmd/databricks-codex
 
 ## Install to GOPATH/bin (also drops the credential-helper alias so Claude
-## Desktop's inferenceCredentialHelper can target a stable path).
+## Desktop's inferenceCredentialHelper can target a stable path). codex
+## installs plainly — no alias, no Desktop/MDM surface.
 install:
 	go install -ldflags="$(LDFLAGS)" ./cmd/databricks-claude
 	$(INSTALL_LINK_ALIAS)
+	go install -ldflags="$(LDFLAGS)" ./cmd/databricks-codex
 
 ## Run tests with verbose output
 test:
@@ -56,7 +60,9 @@ test:
 ## Cross-compile for linux/darwin/windows amd64 + arm64. Symlinks for the
 ## credential-helper alias are NOT generated here — packagers (brew, .pkg,
 ## .deb) are responsible for creating them at install time pointing at a
-## predictable system path.
+## predictable system path. databricks-codex ships the same 6 targets
+## alongside databricks-claude — no credential-helper alias, no .pkg/MDM
+## surface (codex is CLI-only).
 dist:
 	mkdir -p dist
 	GOOS=darwin  GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-darwin-arm64  ./cmd/databricks-claude
@@ -65,6 +71,12 @@ dist:
 	GOOS=linux   GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-linux-arm64   ./cmd/databricks-claude
 	GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-windows-amd64.exe ./cmd/databricks-claude
 	GOOS=windows GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-windows-arm64.exe ./cmd/databricks-claude
+	GOOS=darwin  GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-codex-darwin-arm64  ./cmd/databricks-codex
+	GOOS=darwin  GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-codex-darwin-amd64  ./cmd/databricks-codex
+	GOOS=linux   GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-codex-linux-amd64   ./cmd/databricks-codex
+	GOOS=linux   GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-codex-linux-arm64   ./cmd/databricks-codex
+	GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-codex-windows-amd64.exe ./cmd/databricks-codex
+	GOOS=windows GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-codex-windows-arm64.exe ./cmd/databricks-codex
 
 ## Build a universal2 macOS .pkg installer. Set APPLE_INTERNAL_SIGNING_IDENTITY
 ## to codesign the binary inside the pkg with hardened-runtime flags; otherwise
@@ -152,7 +164,7 @@ generate-signing-cert:
 
 ## Remove build artifacts
 clean:
-	rm -f databricks-claude databricks-claude-credential-helper
+	rm -f databricks-claude databricks-claude-credential-helper databricks-codex
 	rm -rf dist/ build/ root/ scripts/postinstall
 
 ## Run go vet
