@@ -6,7 +6,7 @@ import (
 	"os/exec"
 
 	"github.com/IceRhymers/databricks-agents/internal/cmd"
-	"github.com/IceRhymers/databricks-agents/pkg/authcheck"
+	"github.com/IceRhymers/databricks-agents/internal/core/authcheck"
 )
 
 // setupExecCommand is the exec.Command factory used by runSetupCommand.
