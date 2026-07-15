@@ -11,11 +11,11 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/IceRhymers/databricks-agents/internal/core/portbind"
 	"github.com/IceRhymers/databricks-agents/internal/core/refcount"
 	"github.com/IceRhymers/databricks-agents/pkg/authcheck"
 	"github.com/IceRhymers/databricks-agents/pkg/health"
 	"github.com/IceRhymers/databricks-agents/pkg/lifecycle"
-	"github.com/IceRhymers/databricks-agents/pkg/portbind"
 	"github.com/IceRhymers/databricks-agents/pkg/proxy"
 )
 
