@@ -12,7 +12,7 @@ import (
 	"github.com/IceRhymers/databricks-agents/internal/cmd"
 	"github.com/IceRhymers/databricks-agents/internal/core/authcheck"
 	"github.com/IceRhymers/databricks-agents/internal/core/cli"
-	"github.com/IceRhymers/databricks-agents/pkg/health"
+	"github.com/IceRhymers/databricks-agents/internal/core/health"
 	"github.com/IceRhymers/databricks-agents/pkg/mdmprofile"
 )
 

@@ -18,11 +18,11 @@ import (
 	"github.com/IceRhymers/databricks-agents/internal/core/authcheck"
 	"github.com/IceRhymers/databricks-agents/internal/core/cli"
 	"github.com/IceRhymers/databricks-agents/internal/core/completion"
+	"github.com/IceRhymers/databricks-agents/internal/core/health"
 	"github.com/IceRhymers/databricks-agents/internal/core/portbind"
 	"github.com/IceRhymers/databricks-agents/internal/core/proxy"
 	"github.com/IceRhymers/databricks-agents/internal/core/refcount"
 	"github.com/IceRhymers/databricks-agents/internal/core/updater"
-	"github.com/IceRhymers/databricks-agents/pkg/health"
 	"github.com/IceRhymers/databricks-agents/pkg/mdmprofile"
 	"github.com/IceRhymers/databricks-agents/pkg/websearch"
 )

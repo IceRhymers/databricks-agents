@@ -12,11 +12,11 @@ import (
 	"syscall"
 
 	"github.com/IceRhymers/databricks-agents/internal/core/authcheck"
+	"github.com/IceRhymers/databricks-agents/internal/core/health"
 	"github.com/IceRhymers/databricks-agents/internal/core/lifecycle"
 	"github.com/IceRhymers/databricks-agents/internal/core/portbind"
 	"github.com/IceRhymers/databricks-agents/internal/core/proxy"
 	"github.com/IceRhymers/databricks-agents/internal/core/refcount"
-	"github.com/IceRhymers/databricks-agents/pkg/health"
 )
 
 // runServeSession implements `databricks-claude serve --session-mode`. The
