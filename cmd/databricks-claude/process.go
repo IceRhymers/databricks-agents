@@ -4,7 +4,7 @@ import (
 	"context"
 	"os/exec"
 
-	"github.com/IceRhymers/databricks-agents/pkg/childproc"
+	"github.com/IceRhymers/databricks-agents/internal/core/childproc"
 )
 
 // RunChild starts claude as a child process with the supplied arguments and
