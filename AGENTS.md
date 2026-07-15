@@ -11,10 +11,11 @@ Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth t
 
 | File | Description |
 |------|-------------|
-| `main.go` | CLI entry point: flag parsing, config resolution from `~/.claude/settings.json` and persistent config, token seeding, AI Gateway discovery, proxy startup, settings patching, child launch, and settings restore on exit |
-| `proxy.go` | Thin facade over `internal/core/proxy`: defines `ProxyConfig`, wires up `NewProxyServer` and `StartProxy` |
-| `token.go` | Facade over `internal/core/tokencache`: implements `databricksFetcher` (shells out to `databricks auth token`), host discovery via `databricks auth env`, and AI Gateway URL construction (`{host}/ai-gateway/anthropic`) |
-| `process.go` | Wraps `internal/core/childproc`: `RunChild`, `ForwardSignals` |
+| `main.go` | Thin CLI entry point (#200): subcommand dispatch (completion/update/serve/desktop/setup/config/hooks/doctor + credential-helper alias), `parseArgs`, help/version, then `buildClaudeLaunchPlan(a)` → `core.Run(ClaudeProfile(), plan, a.ClaudeArgs)`. Retains shared package-`main` helpers (`envBlock`, `parseArgs`, `handleHelp`, `defaultModelRouting`, `launchModelRouting`, `databricksFullSetupEnv`, `buildUpdaterConfig`, `handlePrintEnv`, persistent-config helpers). No proxy/port/refcount/child logic remains here. |
+| `launch_claude.go` | `buildClaudeLaunchPlan(a *Args) (core.LaunchPlan, error)` (#200): all claude-specific wrapper pre-flight — logging setup, settings.json read, profile resolution, auth (browser-login fallback, MUST precede token seed), startup security warnings, upstream/OTEL discovery, token seeding, port resolution, settings→state OTEL-table migration, TLS validation, websearch backend — plus the proxyURL-dependent `BuildEnv` closure (OTEL/`CLAUDE_*` env emission). Returns a neutral `core.LaunchPlan` for `core.Run`. |
+| `proxy.go` | Thin facade over `internal/core/proxy` (`ProxyConfig`, `NewProxyServer`, `StartProxy`, `recoveryHandler`). After #200 the launch path calls `proxy.NewServer` directly inside `core.Run`; this facade is retained for `proxy_test.go` cmd-level coverage. |
+| `token.go` | Facade over `internal/core/tokencache`: implements `databricksFetcher` (shells out to `databricks auth token`), host discovery via `databricks auth env`, and AI Gateway URL construction (`{host}/ai-gateway/anthropic`). Consumed by `buildClaudeLaunchPlan` (stays claude-side; a future issue may promote it into `internal/core`). |
+| `process.go` | Wraps `internal/core/childproc`: `ForwardSignals`. (`RunChild` removed in #200 — the launch path now calls `childproc.Run` directly inside `core.Run` with `BinaryName` from `profile.ChildBinary` and the managed marker from `LaunchPlan.ManagedEnvVar`.) |
 | `state.go` | `persistentState` struct and helpers for `~/.claude/.databricks-claude.json` (profile, port, CLI path, OTEL table names) |
 | `hooks.go` | Session hook install/uninstall: `installHooks`, `uninstallHooks` |
 | `ensureconfig.go` | Bootstrap helpers for first-run settings patching |
@@ -37,7 +38,7 @@ Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth t
 | `main_test.go` | Tests for `parseArgs`, `handlePrintEnv`, persistent config, `deriveLogsTable`, full integration scenarios |
 | `config_test.go` | Tests for `config` subcommand parity, OTEL orchestration matrix, websearch resolver, state-preservation invariant on `config otel disable` |
 | `doctor_test.go` | Tests for `diffModelRouting`'s status matrix (ok/drift/stale-legacy/unresolved/new) |
-| `process_test.go` | Tests for `RunChild`, signal forwarding, exit code propagation |
+| `process_test.go` | Tests for `ForwardSignals` signal forwarding and child exit-code propagation |
 | `proxy_test.go` | Tests for inference and OTEL proxy routing, token injection, panic recovery |
 | `token_test.go` | Tests using helper binaries compiled at test time to mock the `databricks` CLI |
 | `state_test.go` | Tests for persistent state load/save |
@@ -57,7 +58,7 @@ Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth t
 |-----------|---------|
 | `cmd/databricks-claude/` | CLI entry point (`main` package), relocated from the repo root in #197. Builds the `databricks-claude` binary. |
 | `internal/cmd/` | Pre-existing command-tree parsing/help/completion library (distinct from `cmd/databricks-claude/`) |
-| `internal/core/` | The shared tool-agnostic engine (proxy, tokencache, authcheck, childproc, state, headless, lifecycle, portbind, health, refcount, updater, completion, cli). Promoted from `pkg/` in #198; module-private (see `internal/core/doc.go`). |
+| `internal/core/` | The shared tool-agnostic engine (proxy, tokencache, authcheck, childproc, state, headless, lifecycle, portbind, health, refcount, updater, completion, cli). Promoted from `pkg/` in #198; module-private (see `internal/core/doc.go`). `run.go` (#200) adds `LaunchPlan` + `Run(profile.Profile, LaunchPlan, []string) int` — the wrapper-mode launch engine (bind → serve/watch → BuildEnv → Patch → child → refcount teardown) shared by all launchers. |
 | `internal/profile/` | Placeholder for profile resolution (epic #196); empty `doc.go` skeleton added in #197, filled by #D/#E |
 | `pkg/` | Only the Claude/Anthropic-coupled libraries remain after #198 (see `pkg/AGENTS.md`): `modeldiscovery`, `mdmprofile`, `websearch` |
 | `pkg/mdmprofile/` | Platform-specific readers for MDM-managed preferences (darwin: plist, windows: registry, other: stub). Used by the credential helper to resolve the Databricks profile on endpoint machines. |
@@ -69,7 +70,7 @@ Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth t
 ### Working In This Directory
 - **Zero external dependencies** -- do not add any third-party imports. All code must use the Go stdlib only.
 - The CLI entry-point package is `main`, located at `cmd/databricks-claude/`. The `.go` files there are thin facades that delegate to the shared engine in `internal/core/` (plus the remaining Claude-coupled `pkg/*` packages). Keep them thin.
-- `main.go` owns flag parsing and orchestration flow. `process.go` owns settings.json lifecycle. `token.go` owns Databricks auth. `proxy.go` owns HTTP proxy wiring.
+- `main.go` is a thin launcher: it dispatches subcommands, parses flags, then delegates wrapper-mode to `buildClaudeLaunchPlan` (`launch_claude.go`, claude pre-flight) + `core.Run` (`internal/core/run.go`, the generic bind/serve/patch/child lifecycle). `token.go` owns Databricks auth; `proxy.go` is a test-facing facade over `internal/core/proxy`. Keep claude-specific launch assembly in `launch_claude.go` and tool-agnostic lifecycle in `internal/core`.
 - `lock.go` and `registry.go` are pure type-alias forwarding files -- they exist only for backward compatibility with root-level tests.
 
 ### Testing Requirements
