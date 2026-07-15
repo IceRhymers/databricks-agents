@@ -3,7 +3,7 @@
 # databricks-agents
 
 ## Purpose
-Monorepo of transparent proxy wrappers that auto-refresh Databricks OAuth tokens via the Databricks CLI, intercepting each wrapped tool's API calls, injecting fresh workspace tokens per-request, and optionally routing OpenTelemetry metrics/logs through the Databricks OTEL endpoint. Two launchers today: `databricks-claude` (wraps Claude Code) and `databricks-codex` (wraps the OpenAI Codex CLI, folded in via #201). Zero external Go dependencies -- pure stdlib only.
+Monorepo of transparent proxy wrappers that auto-refresh Databricks OAuth tokens via the Databricks CLI, intercepting each wrapped tool's API calls, injecting fresh workspace tokens per-request, and optionally routing OpenTelemetry metrics/logs through the Databricks OTEL endpoint. Three launchers today: `databricks-claude` (wraps Claude Code), `databricks-codex` (wraps the OpenAI Codex CLI, folded in via #201), and `databricks-opencode` (wraps the OpenCode CLI, folded in via #202). Zero external Go dependencies -- pure stdlib only.
 
 ## Key Files (`cmd/databricks-claude/`)
 
@@ -71,18 +71,41 @@ The `databricks-codex` launcher (`main` package, folded in via #201). Same monor
 | `commands.go` | Source-of-truth `rootCommand` tree (`config`, `hooks`, `serve` subcommands) |
 | `completion_flags.go` | `flagDefs`/`knownFlags`/`knownSubcommands`, derived from `rootCommand` |
 
+## Key Files (`cmd/databricks-opencode/`)
+
+The `databricks-opencode` launcher (`main` package, folded in via #202). Same monorepo, same `internal/core` engine, but wraps the OpenCode CLI: no settings.json-style env block (surgically patches `~/.config/opencode/opencode.json` every session via `internal/opencode/jsonconfig`), no daemon, no Desktop/MDM surface, and no OTEL. Distinctly larger than codex: dual upstreams (Anthropic `/v1` + Gemini Native `/v1beta`) off one proxy port, plus a default-on Responses-API SSE rewriter.
+
+| File | Description |
+|------|--------------|
+| `main.go` | Thin CLI entry point: subcommand dispatch (completion/config/hooks/serve/update), `parseArgs`, help/version, then `buildOpencodeLaunchPlan(a)` → `core.Run(OpencodeProfile(patcher), plan, a.OpencodeArgs)`. Hosts shared helpers: `defaultModel` (`databricks-claude-opus-4-7`)/`resolveModel`, `resolveProfile`, `handlePrintEnv`, `buildUpdaterConfig`. |
+| `launch_opencode.go` | `buildOpencodeLaunchPlan(a *Args) (core.LaunchPlan, opencodeSettingsPatcher, error)`: opencode pre-flight — logging, profile/model resolution + state saves, auth, port/TLS resolution, token seed, host discovery, gateway URLs (Anthropic `{host}/ai-gateway/anthropic` + Gemini `{host}/ai-gateway/gemini/v1beta`), `exec.LookPath("opencode")` guard. Returns `BuildEnv: nil`, a `/v1beta` Gemini route, `ResponsesRewrite: {Enabled: true}`, no OTEL upstream/tables, plus the field-bearing `opencodeSettingsPatcher`. |
+| `profile_opencode.go` | `OpencodeProfile(patcher)` factory, `opencodeSettingsPatcher` (`SettingsPatcher` impl — `NeedsConfig`-gated, delegates to `jsonconfig.Config.Patch`; `Restore` is a no-op), `opencodeDaemon` (inert `DaemonStrategy` — opencode has no daemon, `Install`/`Uninstall` return `profile.ErrDaemonUnsupported`), `opencodeHooks` (`HookInstaller` — delegates to `hooks.go`, resolving the config dir itself). |
+| `serve_opencode.go` | `serve` subcommand: session/headless sibling entrypoint (lifecycle wrap + idle timeout, no child process, no refcount, no daemon sub-subcommands). Calls the same `opencodeSettingsPatcher.Patch` writer as wrapper mode via `servePatchRequest`, so both paths emit byte-identical opencode.json. `parseServeIdleTimeout` adds the "bare number = minutes" grammar. |
+| `hooks.go` | `installHooks`/`uninstallHooks` write/remove the JS plugin at `<config-dir>/plugins/databricks-proxy/index.js` and register/unregister it in opencode.json via `jsonconfig.AddPlugin`/`RemovePlugin`. `headlessEnsure` spawns `databricks-opencode serve --port=N` via `headless.Config.EnsureCommand=["serve"]` (no refcount — OpenCode has no session-end event). |
+| `hooks_cmd.go` | `hooks <install\|uninstall\|session-start>` subcommand dispatcher (no `session-end` — OpenCode has no session-end event) |
+| `config_cmd.go` | `config <show>` subcommand runner. Smallest surface of the three launchers: only `show` (the `--print-env` diagnostic) — no `write` (no bootstrap), no `otel` (no telemetry). |
+| `state.go` | `persistentState` for `~/.config/opencode/.databricks-opencode.json` (profile, model, port, TLS paths). `defaultPort` `49156`. No OTEL fields. |
+| `token.go` | `NewTokenProvider`/`DiscoverHost`/`ConstructGatewayURL` (Anthropic `/ai-gateway/anthropic`) + `ConstructGeminiGatewayURL` (Gemini `/ai-gateway/gemini/v1beta`) |
+| `configdir.go` | `opencodeConfigDir` — `$XDG_CONFIG_HOME/opencode` or `~/.config/opencode` |
+| `proxy.go` | Facade over `internal/core/proxy` (`ProxyConfig` adds `GeminiUpstream` for the `/v1beta` route; `ResponsesRewrite` default-on); used directly by `serve_opencode.go` (which doesn't route through `core.Run`) |
+| `commands.go` | Source-of-truth `rootCommand` tree (`config`, `hooks`, `serve` subcommands) |
+| `completion_flags.go` | `flagDefs`/`knownFlags`/`knownSubcommands`, derived from `rootCommand` |
+
 ## Subdirectories
 
 | Directory | Purpose |
 |-----------|---------|
 | `cmd/databricks-claude/` | CLI entry point (`main` package), relocated from the repo root in #197. Builds the `databricks-claude` binary. |
 | `cmd/databricks-codex/` | CLI entry point (`main` package) for the codex launcher, folded in via #201. Builds the `databricks-codex` binary. See the Key Files table above. |
-| `internal/cmd/` | Pre-existing command-tree parsing/help/completion library (shared by both launchers' `commands.go`) |
+| `cmd/databricks-opencode/` | CLI entry point (`main` package) for the opencode launcher, folded in via #202. Builds the `databricks-opencode` binary. See the Key Files table above. |
+| `internal/cmd/` | Pre-existing command-tree parsing/help/completion library (shared by all three launchers' `commands.go`) |
 | `internal/core/` | The shared tool-agnostic engine (proxy, tokencache, authcheck, childproc, state, headless, lifecycle, portbind, health, refcount, updater, completion, cli). Promoted from `pkg/` in #198; module-private (see `internal/core/doc.go`). `run.go` (#200) adds `LaunchPlan` + `Run(profile.Profile, LaunchPlan, []string) int` — the wrapper-mode launch engine (bind → serve/watch → BuildEnv → Patch → child → refcount teardown) shared by both launchers. |
 | `internal/codex/` | codex-specific libraries -- the `internal/`-tree analog of `pkg/` for codex, since it must be importable from `cmd/databricks-codex` (see `internal/codex/AGENTS.md`) |
 | `internal/codex/tomlconfig/` | codex-specific string-based surgical patcher for `~/.codex/config.toml` (see `internal/codex/tomlconfig/AGENTS.md`). Not tool-agnostic, so it lives outside `internal/core`; not promoted to `pkg/` since only `cmd/databricks-codex` imports it. |
-| `internal/profile/` | The per-tool `Profile` abstraction (#199): `Profile` struct + `SettingsPatcher`/`DaemonStrategy`/`HookInstaller` interfaces. Interfaces live here; concrete impls live in each launcher's `package main` (`profile_claude.go`, `profile_codex.go`). |
-| `pkg/` | Only the Claude/Anthropic-coupled libraries remain after #198 (see `pkg/AGENTS.md`): `modeldiscovery`, `mdmprofile`, `websearch`. codex has no `pkg/*` packages — its one tool-specific library (`tomlconfig`) lives under `internal/codex/` instead. |
+| `internal/opencode/` | opencode-specific libraries -- the `internal/`-tree analog of `pkg/` for opencode, since it must be importable from `cmd/databricks-opencode` (see `internal/opencode/AGENTS.md`) |
+| `internal/opencode/jsonconfig/` | opencode-specific string/stdlib JSONC surgical patcher for `~/.config/opencode/opencode.json` (see `internal/opencode/jsonconfig/AGENTS.md`). Owns both the `databricks-proxy` (Anthropic `/v1`) and `databricks-gemini-proxy` (Gemini `/v1beta`) providers; a stdlib `stripJSONC` replaces the external `tidwall/jsonc` dep. Not tool-agnostic, so it lives outside `internal/core`; not promoted to `pkg/` since only `cmd/databricks-opencode` imports it. |
+| `internal/profile/` | The per-tool `Profile` abstraction (#199): `Profile` struct + `SettingsPatcher`/`DaemonStrategy`/`HookInstaller` interfaces. Interfaces live here; concrete impls live in each launcher's `package main` (`profile_claude.go`, `profile_codex.go`, `profile_opencode.go`). |
+| `pkg/` | Only the Claude/Anthropic-coupled libraries remain after #198 (see `pkg/AGENTS.md`): `modeldiscovery`, `mdmprofile`, `websearch`. Neither codex nor opencode has `pkg/*` packages — each keeps its one tool-specific config patcher (`tomlconfig`, `jsonconfig`) under `internal/codex/` / `internal/opencode/` instead. |
 | `pkg/mdmprofile/` | Platform-specific readers for MDM-managed preferences (darwin: plist, windows: registry, other: stub). Used by the credential helper to resolve the Databricks profile on endpoint machines. Claude Desktop-only; codex has no Desktop/MDM surface. |
 | `.github/` | GitHub Actions CI configuration (see `.github/AGENTS.md`) |
 | `.claude/` | Claude Code project configuration (settings only, no AGENTS.md needed) |
@@ -122,7 +145,8 @@ The `databricks-codex` launcher (`main` package, folded in via #201). Same monor
 - `internal/cmd` -- command-tree parsing/help/completion library
 - `internal/profile` -- the per-tool `Profile` abstraction (interfaces only; impls live in each launcher)
 - `internal/codex/tomlconfig` -- codex-only: surgical `~/.codex/config.toml` patcher
-- `pkg/modeldiscovery`, `pkg/mdmprofile`, `pkg/websearch` -- claude-only libraries (not promoted into core; codex has no equivalents)
+- `internal/opencode/jsonconfig` -- opencode-only: surgical JSONC `~/.config/opencode/opencode.json` patcher
+- `pkg/modeldiscovery`, `pkg/mdmprofile`, `pkg/websearch` -- claude-only libraries (not promoted into core; codex and opencode have no equivalents)
 
 ### External
 - None (pure Go stdlib)
