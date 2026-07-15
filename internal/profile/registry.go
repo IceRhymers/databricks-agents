@@ -2,12 +2,19 @@ package profile
 
 import "sort"
 
-// Registry is a name→Profile lookup table. It is an API-shape deliverable for
-// the future multiplexer (#H): there is deliberately NO package-level `var
-// Default` and NO init()-time registration, because each launcher is a separate
-// `package main` that cannot import another's Profile — init-registration into a
-// shared Default cannot compose the multiplexer. #H must pick an explicit
-// registration mechanism; this type just proves the lookup shape.
+// Registry is a name→Profile lookup table. There is deliberately NO
+// package-level `var Default` and NO init()-time registration, because each
+// launcher is a separate `package main` that cannot import another's Profile —
+// init-registration into a shared Default cannot compose the multiplexer.
+//
+// The multiplexer (#203, cmd/databricks) resolved that constraint by NOT using
+// this type for dispatch: full Profile values aren't constructible in
+// cmd/databricks (their SettingsPatcher/DaemonStrategy/HookInstaller impls live
+// in each launcher's package main), so it registers a lightweight local
+// name→binary→summary manifest and dispatches by exec-ing the sibling binary.
+// Registry therefore remains an API-shape-only deliverable for full Profiles —
+// exercised by tests and available to any future in-process consumer — not a
+// live dispatch vehicle.
 type Registry struct {
 	m map[string]Profile
 }

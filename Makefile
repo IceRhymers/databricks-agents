@@ -40,12 +40,14 @@ CERT_COUNTRY ?= US
 ## the Claude Desktop MDM artifacts expect — symlink on Unix, hard link on
 ## Windows) plus the databricks-codex and databricks-opencode binaries. codex
 ## and opencode have no credential-helper surface, so they get a plain
-## `go build` with no alias step.
+## `go build` with no alias step. The `databricks` multiplexer dispatches to
+## the three per-tool binaries; its cross-compile/packaging matrix is #204.
 build:
 	go build -ldflags="$(LDFLAGS)" -o databricks-claude$(EXE) ./cmd/databricks-claude
 	$(LINK_ALIAS)
 	go build -ldflags="$(LDFLAGS)" -o databricks-codex$(EXE) ./cmd/databricks-codex
 	go build -ldflags="$(LDFLAGS)" -o databricks-opencode$(EXE) ./cmd/databricks-opencode
+	go build -ldflags="$(LDFLAGS)" -o databricks$(EXE) ./cmd/databricks
 
 ## Install to GOPATH/bin (also drops the credential-helper alias so Claude
 ## Desktop's inferenceCredentialHelper can target a stable path). codex
@@ -55,6 +57,7 @@ install:
 	$(INSTALL_LINK_ALIAS)
 	go install -ldflags="$(LDFLAGS)" ./cmd/databricks-codex
 	go install -ldflags="$(LDFLAGS)" ./cmd/databricks-opencode
+	go install -ldflags="$(LDFLAGS)" ./cmd/databricks
 
 ## Run tests with verbose output
 test:
@@ -173,7 +176,7 @@ generate-signing-cert:
 
 ## Remove build artifacts
 clean:
-	rm -f databricks-claude databricks-claude-credential-helper databricks-codex databricks-opencode
+	rm -f databricks-claude databricks-claude-credential-helper databricks-codex databricks-opencode databricks$(EXE)
 	rm -rf dist/ build/ root/ scripts/postinstall
 
 ## Run go vet

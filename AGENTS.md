@@ -3,7 +3,7 @@
 # databricks-agents
 
 ## Purpose
-Monorepo of transparent proxy wrappers that auto-refresh Databricks OAuth tokens via the Databricks CLI, intercepting each wrapped tool's API calls, injecting fresh workspace tokens per-request, and optionally routing OpenTelemetry metrics/logs through the Databricks OTEL endpoint. Three launchers today: `databricks-claude` (wraps Claude Code), `databricks-codex` (wraps the OpenAI Codex CLI, folded in via #201), and `databricks-opencode` (wraps the OpenCode CLI, folded in via #202). Zero external Go dependencies -- pure stdlib only.
+Monorepo of transparent proxy wrappers that auto-refresh Databricks OAuth tokens via the Databricks CLI, intercepting each wrapped tool's API calls, injecting fresh workspace tokens per-request, and optionally routing OpenTelemetry metrics/logs through the Databricks OTEL endpoint. Three per-tool launchers today: `databricks-claude` (wraps Claude Code), `databricks-codex` (wraps the OpenAI Codex CLI, folded in via #201), and `databricks-opencode` (wraps the OpenCode CLI, folded in via #202), plus the `databricks` multiplexer (`ucode`-style dispatcher, #203) that runs `databricks <claude|codex|opencode> ...` by exec-ing the matching per-tool binary. Zero external Go dependencies -- pure stdlib only.
 
 ## Key Files (`cmd/databricks-claude/`)
 
@@ -91,10 +91,24 @@ The `databricks-opencode` launcher (`main` package, folded in via #202). Same mo
 | `commands.go` | Source-of-truth `rootCommand` tree (`config`, `hooks`, `serve` subcommands) |
 | `completion_flags.go` | `flagDefs`/`knownFlags`/`knownSubcommands`, derived from `rootCommand` |
 
+## Key Files (`cmd/databricks/`)
+
+The `databricks` multiplexer (`main` package, #203) — the `ucode`-style dispatcher. `databricks <agent> [args]` behaves identically to `databricks-<agent> [args]`; `databricks list` enumerates the agents; `databricks completion <shell>` emits nested completion. It is an exec-delegation dispatcher, NOT the issue's literal `argv[1]→profile.Registry→core.Run`: each launcher's full subcommand surface lives in its own un-importable `package main` and `core.Run` only runs the wrapper-launch path, so the multiplexer locates and exec-s the real sibling binary — making "identical" definitional while leaving the three launchers untouched. The three launcher packages are unchanged by #203.
+
+| File | Description |
+|------|--------------|
+| `main.go` | Entry point + the local agent manifest (`agents` slice = name→sibling binary→summary, the registration mechanism #203 chose since full `profile.Profile`s aren't constructible here). `run([]string) int` dispatches: `-h`/`--help` (exit 0), bare (usage→stderr, exit 2), `--version`, `list`, `completion`, else `lookup(agent)` → `resolveBinary` → `delegate`; unknown agent → exit 2. Package doc comment is the doc.go-equivalent. |
+| `dispatch.go` | `resolveBinary(binary)` — prefers a copy co-located with `os.Executable()`'s dir (so a one-bin-dir install always hits the matching-version sibling), falls through to `exec.LookPath` on error/relative/miss. `binaryFileName` (adds `.exe` on windows), `isExecutableFile`. |
+| `dispatch_unix.go` | `//go:build !windows` — `delegate` via `syscall.Exec(path, {path, args...}, os.Environ())`: replaces the process image (same PID → perfect signal/exit fidelity); argv[0] = resolved sibling path (child sees `databricks-<agent>` basename, never misfires the credential-helper alias); env = `os.Environ()`. |
+| `dispatch_windows.go` | `//go:build windows` — `delegate` spawns `exec.Command` (Windows has no execve) with inherited stdio + `os.Environ()`, forwards SIGINT/SIGTERM, propagates the child's `ExitCode`. |
+| `completion.go` | Nested completion. `bash` (fully functional): composes each `databricks-<agent> completion bash` (registration lines stripped) + a git-style `_databricks` wrapper that rewrites `COMP_WORDS`/`COMP_CWORD` to the sibling frame and calls `_databricks_<agent>`. `zsh` mirrors it (rewrites `words`/`CURRENT`). `fish` is agent-name-only (documented fallback — fish's binary-keyed model resists clean delegation). A sibling whose completion can't be obtained degrades to name-only. `runSiblingCompletion` is a package var for test injection. |
+| `main_test.go` / `dispatch_test.go` / `completion_test.go` | Unit + integration coverage: list/usage/version/unknown-agent(exit 2)/reserved-word; `resolveBinary` PATH-fallback/miss; delegation fidelity (built stub sibling — asserts argv[0] basename, verbatim args incl. `--`, env propagation, exit-code 7 passthrough); completion generation + missing-sibling degrade; a **bash-driven functional** test that sources the script and asserts `databricks claude serve ⇥` reaches the sibling subtree. |
+
 ## Subdirectories
 
 | Directory | Purpose |
 |-----------|---------|
+| `cmd/databricks/` | The `databricks` multiplexer (`main` package, #203). Exec-delegation dispatcher over the three per-tool binaries. See the Key Files table above. |
 | `cmd/databricks-claude/` | CLI entry point (`main` package), relocated from the repo root in #197. Builds the `databricks-claude` binary. |
 | `cmd/databricks-codex/` | CLI entry point (`main` package) for the codex launcher, folded in via #201. Builds the `databricks-codex` binary. See the Key Files table above. |
 | `cmd/databricks-opencode/` | CLI entry point (`main` package) for the opencode launcher, folded in via #202. Builds the `databricks-opencode` binary. See the Key Files table above. |

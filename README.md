@@ -43,7 +43,7 @@ Download the latest release from the [releases page](https://github.com/IceRhyme
 go install github.com/IceRhymers/databricks-agents/cmd/databricks-claude@latest
 ```
 
-This module also builds `databricks-codex` (`go install github.com/IceRhymers/databricks-agents/cmd/databricks-codex@latest`) and `databricks-opencode` (`go install github.com/IceRhymers/databricks-agents/cmd/databricks-opencode@latest`) — see [`databricks-codex`](#databricks-codex) and [`databricks-opencode`](#databricks-opencode) below for their own install/usage.
+This module also builds `databricks-codex` (`go install github.com/IceRhymers/databricks-agents/cmd/databricks-codex@latest`) and `databricks-opencode` (`go install github.com/IceRhymers/databricks-agents/cmd/databricks-opencode@latest`) — see [`databricks-codex`](#databricks-codex) and [`databricks-opencode`](#databricks-opencode) below for their own install/usage — plus the [`databricks`](#databricks-multiplexer) multiplexer that dispatches to all three.
 
 ## Pick Your Setup
 
@@ -1052,6 +1052,38 @@ export DATABRICKS_NO_UPDATE_CHECK=1
 ```
 
 Both suppress the startup check and disable the `update` subcommand.
+
+## databricks (multiplexer)
+
+> **Disclaimer:** Same as above — unofficial, community-built, not supported or endorsed by Databricks. Use at your own risk.
+
+`databricks` is the [`ucode`](https://github.com/databricks/ucode)-style multiplexer: one command that dispatches to the three per-tool binaries. `databricks <agent> [args]` behaves **identically** to running `databricks-<agent> [args]` directly (it locates and hands off to that binary), so every subcommand — `config`, `serve`, `hooks`, `completion`, `desktop`, … — works exactly as documented for the underlying tool. The per-tool binaries remain first-class and are unaffected; use whichever entry point you prefer.
+
+### Install
+
+```bash
+go install github.com/IceRhymers/databricks-agents/cmd/databricks@latest
+# and the per-tool binaries it dispatches to:
+go install github.com/IceRhymers/databricks-agents/cmd/databricks-claude@latest
+go install github.com/IceRhymers/databricks-agents/cmd/databricks-codex@latest
+go install github.com/IceRhymers/databricks-agents/cmd/databricks-opencode@latest
+```
+
+`databricks` finds each sibling next to its own binary first (so `make install`, Homebrew, and Scoop layouts that share one bin dir always match versions), then falls back to your `PATH`.
+
+### Usage
+
+```bash
+databricks claude [proxy-flags] [-- claude-args]      # == databricks-claude ...
+databricks codex  [proxy-flags] [-- codex-args]       # == databricks-codex ...
+databricks opencode [proxy-flags] [-- opencode-args]  # == databricks-opencode ...
+
+databricks list                 # enumerate the registered agents
+databricks completion bash      # nested completion (bash|zsh|fish)
+databricks --version            # multiplexer version
+```
+
+Nested shell completion delegates into each agent's own tree — `databricks claude serve <TAB>` completes `install`/`uninstall`/`status`, exactly as `databricks-claude serve <TAB>` does (bash and zsh; fish completes agent names).
 
 ## databricks-codex
 
