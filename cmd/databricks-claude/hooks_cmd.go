@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 
 	"github.com/IceRhymers/databricks-agents/internal/cmd"
 )
@@ -59,12 +58,6 @@ func runHooksInstall(args []string) {
 		os.Exit(0)
 	}
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		log.Fatalf("databricks-claude: cannot determine home dir: %v", err)
-	}
-	settingsPath := filepath.Join(homeDir, ".claude", "settings.json")
-
 	resolvedProfile := r.Strings["profile"]
 	if resolvedProfile == "" {
 		resolvedProfile = "DEFAULT"
@@ -76,7 +69,7 @@ func runHooksInstall(args []string) {
 	if err := bootstrapSettings(portFlag, resolvedProfile, placeholder, nil); err != nil {
 		log.Fatalf("databricks-claude: hooks install bootstrap: %v", err)
 	}
-	if err := installHooks(settingsPath); err != nil {
+	if err := ClaudeProfile().HookInstaller.Install(); err != nil {
 		log.Fatalf("databricks-claude: hooks install: %v", err)
 	}
 	fmt.Fprintln(os.Stderr, "databricks-claude: hooks installed — SessionStart and SessionEnd hooks added to ~/.claude/settings.json")
@@ -94,13 +87,7 @@ func runHooksUninstall(args []string) {
 		os.Exit(0)
 	}
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		log.Fatalf("databricks-claude: cannot determine home dir: %v", err)
-	}
-	settingsPath := filepath.Join(homeDir, ".claude", "settings.json")
-
-	if err := uninstallHooks(settingsPath); err != nil {
+	if err := ClaudeProfile().HookInstaller.Uninstall(); err != nil {
 		log.Fatalf("databricks-claude: hooks uninstall: %v", err)
 	}
 	fmt.Fprintln(os.Stderr, "databricks-claude: hooks removed from ~/.claude/settings.json")

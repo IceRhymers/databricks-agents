@@ -13,6 +13,7 @@ import (
 	"github.com/IceRhymers/databricks-agents/internal/core/authcheck"
 	"github.com/IceRhymers/databricks-agents/internal/core/cli"
 	"github.com/IceRhymers/databricks-agents/internal/core/health"
+	prof "github.com/IceRhymers/databricks-agents/internal/profile"
 	"github.com/IceRhymers/databricks-agents/pkg/mdmprofile"
 )
 
@@ -291,18 +292,16 @@ func runInstall(args []string) {
 		}
 	}
 
-	opts := installOptions{
-		binPath:      binPath,
-		port:         port,
-		profile:      profile,
-		logFile:      logFile,
-		metricsTable: resolvedMetrics,
-		logsTable:    resolvedLogs,
-		tracesTable:  resolvedTraces,
-		cliPath:      cliPathResolved,
-	}
-
-	if err := installDaemon(opts); err != nil {
+	if err := ClaudeProfile().DaemonStrategy.Install(prof.DaemonInstallRequest{
+		BinPath:      binPath,
+		Port:         port,
+		Profile:      profile,
+		LogFile:      logFile,
+		MetricsTable: resolvedMetrics,
+		LogsTable:    resolvedLogs,
+		TracesTable:  resolvedTraces,
+		CLIPath:      cliPathResolved,
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "databricks-claude serve install: %v\n", err)
 		os.Exit(1)
 	}
@@ -316,7 +315,7 @@ func runInstall(args []string) {
 		fmt.Fprintf(os.Stderr, "databricks-claude: daemon installed and healthy at 127.0.0.1:%d\n", port)
 	} else {
 		fmt.Fprintln(os.Stderr, "databricks-claude: serve install: post-install probe timed out after 10s; daemon may still be starting — see diagnostics below")
-		if tail, _ := diagnosticsTail(); tail != "" {
+		if tail, _ := ClaudeProfile().DaemonStrategy.Diagnostics(); tail != "" {
 			fmt.Fprintln(os.Stderr, "--- daemon diagnostics ---")
 			fmt.Fprintln(os.Stderr, tail)
 			fmt.Fprintln(os.Stderr, "--- end diagnostics ---")
@@ -354,7 +353,7 @@ func runUninstall(args []string) {
 		os.Exit(0)
 	}
 
-	if err := uninstallDaemon(); err != nil {
+	if err := ClaudeProfile().DaemonStrategy.Uninstall(); err != nil {
 		fmt.Fprintf(os.Stderr, "databricks-claude serve uninstall: %v\n", err)
 		os.Exit(1)
 	}
@@ -373,13 +372,13 @@ func runStatus(args []string) {
 	st := loadState()
 	port := resolvePort(0, st)
 
-	result, err := daemonStatus(port)
+	result, err := ClaudeProfile().DaemonStrategy.Status(port)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "databricks-claude serve status: %v\n", err)
 		os.Exit(1)
 	}
 
-	printStatusResult(result)
+	printStatusResult(fromDaemonStatus(result))
 }
 
 // printStatusResult prints a human-readable status report to stdout.
