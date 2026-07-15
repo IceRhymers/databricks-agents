@@ -9,7 +9,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/IceRhymers/databricks-agents/pkg/refcount"
+	"github.com/IceRhymers/databricks-agents/internal/core/refcount"
 )
 
 func TestEnsure_ManagedSessionSkips(t *testing.T) {

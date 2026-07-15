@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/IceRhymers/databricks-agents/internal/cmd"
+	"github.com/IceRhymers/databricks-agents/internal/core/refcount"
 	"github.com/IceRhymers/databricks-agents/pkg/lifecycle"
-	"github.com/IceRhymers/databricks-agents/pkg/refcount"
 )
 
 // shutdownResp mirrors the JSON body returned by POST /shutdown for test decoding.

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/IceRhymers/databricks-agents/pkg/refcount"
+	"github.com/IceRhymers/databricks-agents/internal/core/refcount"
 )
 
 // Config holds the parameters for WrapWithLifecycle.

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/IceRhymers/databricks-agents/internal/cmd"
+	"github.com/IceRhymers/databricks-agents/internal/core/refcount"
 	"github.com/IceRhymers/databricks-agents/pkg/authcheck"
 	"github.com/IceRhymers/databricks-agents/pkg/cli"
 	"github.com/IceRhymers/databricks-agents/pkg/completion"
@@ -22,7 +23,6 @@ import (
 	"github.com/IceRhymers/databricks-agents/pkg/mdmprofile"
 	"github.com/IceRhymers/databricks-agents/pkg/portbind"
 	"github.com/IceRhymers/databricks-agents/pkg/proxy"
-	"github.com/IceRhymers/databricks-agents/pkg/refcount"
 	"github.com/IceRhymers/databricks-agents/pkg/updater"
 	"github.com/IceRhymers/databricks-agents/pkg/websearch"
 )
