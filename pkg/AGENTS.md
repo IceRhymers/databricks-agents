@@ -4,36 +4,25 @@
 # pkg
 
 ## Purpose
-Reusable library packages extracted from the root `main` package. Each sub-package is self-contained, has its own tests, and exposes clean interfaces. The root `.go` files in the project are thin facades that wire these packages together.
+After #198, `pkg/` holds **only the Claude/Anthropic-coupled libraries** — everything tool-agnostic was promoted into `internal/core/` (the shared engine; see `../internal/core/doc.go`). The three packages here are deliberately kept out of core because they are Claude-only, and move later with the claude Profile in #E. Each is self-contained, has its own tests, and is stdlib-only.
 
 ## Subdirectories
 
 | Directory | Purpose |
 |-----------|---------|
-| `authcheck/` | Pre-flight Databricks authentication verification and interactive login (see `authcheck/AGENTS.md`) |
-| `childproc/` | Child process lifecycle: start, signal forwarding, exit code propagation (see `childproc/AGENTS.md`) |
-| `completion/` | Shell completion script generation (bash, zsh, fish) from `FlagDef` slices |
-| `headless/` | Detached-proxy spawn helpers: `Ensure` (start-if-absent) and refcount integration. `Config.EnsureCommand` (added in #174) lets databricks-claude spawn `serve --session-mode` instead of the deleted `--headless` root flag; siblings (databricks-codex, databricks-opencode) leave it empty for the legacy `--headless` shape. |
-| `health/` | `/health` endpoint handler returning JSON liveness data |
-| `lifecycle/` | HTTP handler wrapper adding `/shutdown` and idle timeout |
-| `modeldiscovery/` | Unity AI Gateway model-services discovery: lists UC model-services, resolves the newest anthropic-capable model per family (opus/sonnet/haiku) via a pure `Resolve()` function, numeric version sort, and the 1M-context predicate |
-| `portbind/` | Port binding helpers with configured-port support |
-| `proxy/` | HTTP/WebSocket reverse proxy, security checks, log sanitization (see `proxy/AGENTS.md`) |
-| `refcount/` | Atomic session reference counter |
-| `state/` | JSON-file state persistence helpers (atomic writes) |
-| `tokencache/` | Generic mutex-guarded token cache with configurable fetcher (see `tokencache/AGENTS.md`) |
-| `updater/` | GitHub release checker with 24-hour cache and numeric semver comparison |
+| `modeldiscovery/` | Unity AI Gateway model-services discovery: lists UC model-services, resolves the newest anthropic-capable model per family (opus/sonnet/haiku) via a pure `Resolve()` function, numeric version sort, and the 1M-context predicate. Claude-coupled (Opus/Sonnet/Haiku + `anthropic/v1/messages` predicate). |
+| `mdmprofile/` | Platform-specific readers for Desktop MDM-managed preferences (darwin plist / windows registry / other stub). Claude Desktop-only. |
+| `websearch/` | Web-search backends (DuckDuckGo etc.) for Claude's server-side web-search tool. Imported by `internal/core/proxy`'s websearch handler — a documented, temporary `internal/core → pkg` back-edge resolved in #E. |
+
+> The tool-agnostic packages (authcheck, childproc, cli, completion, headless, health, lifecycle, portbind, proxy, refcount, state, tokencache, updater) now live under `../internal/core/`; their per-package `AGENTS.md` files moved with them.
 
 ## For AI Agents
 
 ### Working In This Directory
 - Each package must remain **zero external dependencies** -- Go stdlib only.
-- Packages expose interfaces (`TokenFetcher`, `TokenSource`, `Locker`, `SessionTracker`) so the root `main` package can plug in concrete implementations.
-- Do not add cross-dependencies between sibling packages. Each package should be independently importable.
 
 ### Testing Requirements
-- Each package has co-located `*_test.go` files. Run `go test ./pkg/...` to test all packages.
-- `proxy/` has the most extensive tests.
+- Each package has co-located `*_test.go` files. Run `go test ./pkg/...` to test these, or `go test ./...` for the whole module.
 
 ### Common Patterns
 - Packages that do I/O use **atomic temp-file + rename** for safe writes.

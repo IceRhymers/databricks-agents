@@ -16,7 +16,7 @@ make install                     # installs to $GOPATH/bin
 make dist                        # cross-compile darwin/linux/windows amd64+arm64
 go build ./cmd/databricks-claude # build the CLI binary directly (module: github.com/IceRhymers/databricks-agents)
 go test -run TestParseArgs -v    # run a single test
-go test ./pkg/proxy/... -v       # test a single package
+go test ./internal/core/proxy/... -v  # test a single package
 ```
 
 The Go module is `github.com/IceRhymers/databricks-agents`. The CLI entry point (`main` package) lives at `cmd/databricks-claude/`; the built binary is still named `databricks-claude`.
@@ -25,12 +25,12 @@ The Go module is `github.com/IceRhymers/databricks-agents`. The CLI entry point 
 
 ### CLI entry-point package (`cmd/databricks-claude/`, package `main`)
 
-The `main` package lives at `cmd/databricks-claude/` — a set of `.go` files that act as thin facades wiring together `pkg/` sub-packages (relocated from the repo root in #197):
+The `main` package lives at `cmd/databricks-claude/` — a set of `.go` files that act as thin facades wiring together the shared engine in `internal/core/` (relocated from the repo root in #197; the tool-agnostic `pkg/*` packages were promoted into `internal/core` in #198) plus the Claude-coupled `pkg/*` packages that remain (`modeldiscovery`, `mdmprofile`, `websearch`):
 
 - **main.go** — CLI entry point: flag parsing, config resolution (`~/.claude/settings.json` + `~/.claude/.databricks-claude.json`), token seeding, AI Gateway auto-discovery, proxy startup, settings patching, child launch, and explicit settings restore before `os.Exit`. After #174 the session-scoped lifecycle (refcount, /shutdown, idle-timeout) lives in `serve_session.go`; main.go owns wrapper-mode (proxy + claude child) only. `databricksFullSetupEnv(m ModelRouting)` now takes a `ModelRouting` and omits a family's `ANTHROPIC_*_MODEL` key when its FQN is empty (no silent mis-route for an unresolved family). `defaultModelRouting()` is the demoted offline fallback (the former hardcoded model map); `launchModelRouting(s persistentState)` returns the persisted `ModelRouting` from state, filling any blank family from the fallback — used only by launch-path callers, which never call `pkg/modeldiscovery` themselves.
-- **proxy.go** — Facade over `pkg/proxy`: defines `ProxyConfig`, wires `NewProxyServer` and `StartProxy`.
-- **token.go** — Facade over `pkg/tokencache`: implements `databricksFetcher` (shells out to `databricks auth token`), host discovery via `databricks auth env`, AI Gateway URL construction (`{host}/ai-gateway/anthropic`).
-- **process.go** — Wraps `pkg/childproc`: `RunChild`, `ForwardSignals`.
+- **proxy.go** — Facade over `internal/core/proxy`: defines `ProxyConfig`, wires `NewProxyServer` and `StartProxy`.
+- **token.go** — Facade over `internal/core/tokencache`: implements `databricksFetcher` (shells out to `databricks auth token`), host discovery via `databricks auth env`, AI Gateway URL construction (`{host}/ai-gateway/anthropic`).
+- **process.go** — Wraps `internal/core/childproc`: `RunChild`, `ForwardSignals`.
 - **state.go** — `persistentState` struct: JSON schema for `~/.claude/.databricks-claude.json` (profile, port, CLI path, OTEL table names, and `Models *ModelRouting` — the discovered per-family model FQNs, nil until a discovery-time writer runs). `ModelRouting{Opus,Sonnet,Haiku string}` mirrors `pkg/modeldiscovery.ModelSet` but is the on-disk/launch-path shape; the `[1m]` suffix, when applicable, is already baked into the FQN string.
 - **hooks.go** — Session hook install/uninstall (`installHooks`, `uninstallHooks`).
 - **ensureconfig.go** — Bootstrap helpers for first-run settings setup.
@@ -49,40 +49,50 @@ The `main` package lives at `cmd/databricks-claude/` — a set of `.go` files th
 - **serve_install_windows.go** — `//go:build windows` — `schtasks /create /SC ONLOGON /RL LIMITED` with `/TR` argument escaping (`buildSchtasksCmd`), `schtasks /run`/`/delete /F`/`/query /V /FO CSV` parsing, `diagnosticsTail()` returns a "not implemented" hint pointing at the daemon stderr log (schtasks has no built-in journal). `$DATABRICKS_CLI` env baking is documented as a known gap because `setx` scoping inside `/TR` fights cmd.exe escaping; users with brew-on-Windows need to set `DATABRICKS_CLI` system-wide before install.
 - **serve_install_other.go** — `//go:build !darwin && !windows && !linux` — stubs returning "unsupported platform" error for `installDaemon`/`uninstallDaemon`/`daemonStatus`, plus a `("", nil)` `diagnosticsTail` so cross-platform CI builds (freebsd/openbsd) compile.
 
-### Library packages (`pkg/`)
+### Core packages (`internal/core/`)
 
-Each package is independently importable with no cross-dependencies:
+The tool-agnostic proxy/auth/gateway/token/state engine every launcher runs. Promoted from `pkg/` into module-private `internal/core` in #198 (no behavior change) — the `internal/` boundary is compiler-enforced, so only this module can import them:
 
 | Package | Purpose |
 |---------|---------|
-| `pkg/authcheck` | Pre-flight Databricks auth check + interactive browser login fallback |
-| `pkg/childproc` | Child process start, SIGINT/SIGTERM forwarding, exit code propagation |
-| `pkg/completion` | Shell completion script generation (bash, zsh, fish) from `FlagDef` slices |
-| `pkg/headless` | Detached-proxy spawn helpers: `Ensure` (start-if-absent) and `Release` (refcount decrement). `Config.EnsureCommand` (added in #174) lets databricks-claude target `serve --session-mode` instead of the deleted `--headless` root flag; siblings (databricks-codex, databricks-opencode) leave it empty for the legacy `--headless` shape. |
-| `pkg/health` | `/health` endpoint handler returning JSON with tool name, version, and PID |
-| `pkg/lifecycle` | HTTP handler wrapper adding `/shutdown` refcount endpoint and idle timeout |
-| `pkg/modeldiscovery` | Unity AI Gateway model-services discovery: lists UC model-services, resolves newest anthropic-capable model per family (opus/sonnet/haiku), pure `Resolve()` + numeric version sort + 1M predicate. Stdlib only. |
-| `pkg/portbind` | Port binding helpers: bind to a configured port with fallback |
-| `pkg/proxy` | HTTP/WebSocket reverse proxy, OTEL routing, API key auth, TLS, panic recovery, log sanitization |
-| `pkg/refcount` | Atomic session reference counter with conditional-exit support |
-| `pkg/state` | JSON-file state persistence helpers (atomic temp-file + rename) |
-| `pkg/tokencache` | Mutex-guarded token cache with 5-min refresh buffer and fallback-on-error |
-| `pkg/updater` | GitHub release checker with 24-hour cache and numeric semver comparison |
+| `internal/core/authcheck` | Pre-flight Databricks auth check + interactive browser login fallback |
+| `internal/core/childproc` | Child process start, SIGINT/SIGTERM forwarding, exit code propagation |
+| `internal/core/cli` | Shared CLI helpers |
+| `internal/core/completion` | Shell completion script generation (bash, zsh, fish) from `FlagDef` slices |
+| `internal/core/headless` | Detached-proxy spawn helpers: `Ensure` (start-if-absent) and `Release` (refcount decrement). `Config.EnsureCommand` (added in #174) lets databricks-claude target `serve --session-mode` instead of the deleted `--headless` root flag; siblings (databricks-codex, databricks-opencode) leave it empty for the legacy `--headless` shape. |
+| `internal/core/health` | `/health` endpoint handler returning JSON with tool name, version, and PID |
+| `internal/core/lifecycle` | HTTP handler wrapper adding `/shutdown` refcount endpoint and idle timeout |
+| `internal/core/portbind` | Port binding helpers: bind to a configured port with fallback |
+| `internal/core/proxy` | HTTP/WebSocket reverse proxy, OTEL routing, API key auth, TLS, panic recovery, log sanitization. **Still imports `pkg/websearch` and houses the anthropic wire bits (`sse_rewriter.go`, `websearch_handler.go`, `responses_rewriter.go`, `anthropic/`)** — a deliberate, documented `internal/core → pkg` back-edge deferred to the #E work that moves those bits out with the claude Profile. |
+| `internal/core/refcount` | Atomic session reference counter with conditional-exit support |
+| `internal/core/state` | JSON-file state persistence helpers (atomic temp-file + rename) |
+| `internal/core/tokencache` | Mutex-guarded token cache with 5-min refresh buffer and fallback-on-error |
+| `internal/core/updater` | GitHub release checker with 24-hour cache and numeric semver comparison |
+
+### Library packages (`pkg/`)
+
+Only the Claude/Anthropic-coupled packages remain here after #198 — deliberately **not** promoted into `internal/core` (they move later, with the claude Profile in #E):
+
+| Package | Purpose |
+|---------|---------|
+| `pkg/modeldiscovery` | Unity AI Gateway model-services discovery: lists UC model-services, resolves newest anthropic-capable model per family (opus/sonnet/haiku), pure `Resolve()` + numeric version sort + 1M predicate. Stdlib only. Claude-coupled (Opus/Sonnet/Haiku + `anthropic/v1/messages` predicate). |
+| `pkg/mdmprofile` | Platform-specific readers for Desktop MDM-managed preferences (darwin plist / windows registry / other stub). Claude Desktop-only. |
+| `pkg/websearch` | Web-search backends (DuckDuckGo etc.) for Claude's server-side web-search tool. Claude-only; imported by `internal/core/proxy`'s websearch handler (the deferred back-edge above). |
 
 ### Internal packages (`internal/`)
 
 | Package | Purpose |
 |---------|---------|
 | `internal/cmd` | Pre-existing command-tree parsing/help/completion library (distinct from `cmd/databricks-claude/`; drives `rootCommand` in `commands.go`). |
-| `internal/core` | Placeholder for the unified core module surface (epic #196). Empty `doc.go` skeleton added in #197. |
-| `internal/profile` | Placeholder for profile resolution (epic #196). Empty `doc.go` skeleton added in #197. |
+| `internal/core` | The shared tool-agnostic engine (proxy/auth/gateway/token/state). Populated in #198 — see the Core packages table above. |
+| `internal/profile` | Placeholder for profile resolution (epic #196). Empty `doc.go` skeleton added in #197; filled by #D/#E. |
 
 ### Key data flow
 
 1. Wrapper mode: `main.go` seeds token cache → binds proxy on the configured port (default `49153`) → patches `settings.json` to point `ANTHROPIC_BASE_URL` at proxy → launches `claude` as child.
-2. Session-scoped standalone proxy: `serve --session-mode` (in `serve_session.go`) does the same setup but blocks on SIGINT/SIGTERM or `/shutdown` instead of launching claude. Handler is wrapped with `pkg/lifecycle` (`POST /shutdown` refcount decrement + conditional exit; idle timeout defaults to 30m, resets on each proxied request).
+2. Session-scoped standalone proxy: `serve --session-mode` (in `serve_session.go`) does the same setup but blocks on SIGINT/SIGTERM or `/shutdown` instead of launching claude. Handler is wrapped with `internal/core/lifecycle` (`POST /shutdown` refcount decrement + conditional exit; idle timeout defaults to 30m, resets on each proxied request).
 3. Long-lived daemon: `serve --daemon` (in `serve.go`) binds the port exclusively, never wraps with lifecycle (so `/shutdown` returns 404), and reports `daemon:true` in `/health`.
-4. Proxy intercepts every request, injects fresh OAuth token via `pkg/tokencache` → forwards to AI Gateway (`{host}/ai-gateway/anthropic`) or Databricks OTEL endpoint.
+4. Proxy intercepts every request, injects fresh OAuth token via `internal/core/tokencache` → forwards to AI Gateway (`{host}/ai-gateway/anthropic`) or Databricks OTEL endpoint.
 5. On exit, settings are restored **explicitly before `os.Exit`** (not via defer — `os.Exit` skips defers). `ANTHROPIC_BASE_URL` is handed off to a surviving session if one exists.
 
 ## Key Design Constraints

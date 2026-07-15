@@ -929,7 +929,7 @@ If Claude Code is calling a model you didn't expect (e.g. after Databricks ships
 
 ## Shell Tab Completions
 
-`databricks-claude` includes a completion engine (`pkg/completion`) that generates shell scripts from the binary's own flag definitions, so they stay in sync automatically. If you installed via Homebrew, completions are registered automatically — no manual setup required.
+`databricks-claude` includes a completion engine (`internal/core/completion`) that generates shell scripts from the binary's own flag definitions, so they stay in sync automatically. If you installed via Homebrew, completions are registered automatically — no manual setup required.
 
 ### Manual installation
 
@@ -957,7 +957,7 @@ databricks-claude completion fish | source
 
 ### How the engine works
 
-This section documents the `pkg/completion` package for other projects that import it.
+This section documents the `internal/core/completion` package (promoted from `pkg/completion` in #198) used by the launchers in this module. It is now module-private (`internal/`), so only launchers inside this repo import it — the sibling launchers that fold into the monorepo (epic #196) consume it from here.
 
 The `completion` subcommand is the very first check in `main()`, before any config loading, auth, or state. This makes it safe to call in restricted environments like the Homebrew install sandbox.
 
@@ -989,10 +989,10 @@ Completers are emitted as shell functions embedded in the generated script — n
 
 **Adding a new flag** — add an entry to the `flagDefs` slice. The completion script, `knownFlags` map, and flag parsing all derive from this single slice. Consistency tests enforce that every `FlagDef` appears in `knownFlags` and vice-versa.
 
-**Integrating in another binary** — import `pkg/completion`, define your own `[]FlagDef`, and add the early-exit check to `main()`:
+**Integrating in another launcher** (within this module) — import `internal/core/completion`, define your own `[]FlagDef`, and add the early-exit check to `main()`:
 
 ```go
-import "github.com/IceRhymers/databricks-agents/pkg/completion"
+import "github.com/IceRhymers/databricks-agents/internal/core/completion"
 
 var flagDefs = []completion.FlagDef{ /* ... */ }
 

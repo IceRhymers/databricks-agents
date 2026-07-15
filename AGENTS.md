@@ -12,9 +12,9 @@ Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth t
 | File | Description |
 |------|-------------|
 | `main.go` | CLI entry point: flag parsing, config resolution from `~/.claude/settings.json` and persistent config, token seeding, AI Gateway discovery, proxy startup, settings patching, child launch, and settings restore on exit |
-| `proxy.go` | Thin facade over `pkg/proxy`: defines `ProxyConfig`, wires up `NewProxyServer` and `StartProxy` |
-| `token.go` | Facade over `pkg/tokencache`: implements `databricksFetcher` (shells out to `databricks auth token`), host discovery via `databricks auth env`, and AI Gateway URL construction (`{host}/ai-gateway/anthropic`) |
-| `process.go` | Wraps `pkg/childproc`: `RunChild`, `ForwardSignals` |
+| `proxy.go` | Thin facade over `internal/core/proxy`: defines `ProxyConfig`, wires up `NewProxyServer` and `StartProxy` |
+| `token.go` | Facade over `internal/core/tokencache`: implements `databricksFetcher` (shells out to `databricks auth token`), host discovery via `databricks auth env`, and AI Gateway URL construction (`{host}/ai-gateway/anthropic`) |
+| `process.go` | Wraps `internal/core/childproc`: `RunChild`, `ForwardSignals` |
 | `state.go` | `persistentState` struct and helpers for `~/.claude/.databricks-claude.json` (profile, port, CLI path, OTEL table names) |
 | `hooks.go` | Session hook install/uninstall: `installHooks`, `uninstallHooks` |
 | `ensureconfig.go` | Bootstrap helpers for first-run settings patching |
@@ -57,9 +57,9 @@ Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth t
 |-----------|---------|
 | `cmd/databricks-claude/` | CLI entry point (`main` package), relocated from the repo root in #197. Builds the `databricks-claude` binary. |
 | `internal/cmd/` | Pre-existing command-tree parsing/help/completion library (distinct from `cmd/databricks-claude/`) |
-| `internal/core/` | Placeholder for the unified core module surface (epic #196); empty `doc.go` skeleton added in #197 |
-| `internal/profile/` | Placeholder for profile resolution (epic #196); empty `doc.go` skeleton added in #197 |
-| `pkg/` | Reusable library packages extracted from the monolithic main (see `pkg/AGENTS.md`) |
+| `internal/core/` | The shared tool-agnostic engine (proxy, tokencache, authcheck, childproc, state, headless, lifecycle, portbind, health, refcount, updater, completion, cli). Promoted from `pkg/` in #198; module-private (see `internal/core/doc.go`). |
+| `internal/profile/` | Placeholder for profile resolution (epic #196); empty `doc.go` skeleton added in #197, filled by #D/#E |
+| `pkg/` | Only the Claude/Anthropic-coupled libraries remain after #198 (see `pkg/AGENTS.md`): `modeldiscovery`, `mdmprofile`, `websearch` |
 | `pkg/mdmprofile/` | Platform-specific readers for MDM-managed preferences (darwin: plist, windows: registry, other: stub). Used by the credential helper to resolve the Databricks profile on endpoint machines. |
 | `.github/` | GitHub Actions CI configuration (see `.github/AGENTS.md`) |
 | `.claude/` | Claude Code project configuration (settings only, no AGENTS.md needed) |
@@ -68,7 +68,7 @@ Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth t
 
 ### Working In This Directory
 - **Zero external dependencies** -- do not add any third-party imports. All code must use the Go stdlib only.
-- The CLI entry-point package is `main`, located at `cmd/databricks-claude/`. The `.go` files there are thin facades that delegate to `pkg/` sub-packages. Keep them thin.
+- The CLI entry-point package is `main`, located at `cmd/databricks-claude/`. The `.go` files there are thin facades that delegate to the shared engine in `internal/core/` (plus the remaining Claude-coupled `pkg/*` packages). Keep them thin.
 - `main.go` owns flag parsing and orchestration flow. `process.go` owns settings.json lifecycle. `token.go` owns Databricks auth. `proxy.go` owns HTTP proxy wiring.
 - `lock.go` and `registry.go` are pure type-alias forwarding files -- they exist only for backward compatibility with root-level tests.
 
@@ -90,14 +90,13 @@ Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth t
 
 ## Dependencies
 
-### Internal
-- `pkg/authcheck` -- pre-flight auth verification
-- `pkg/childproc` -- child process management
-- `pkg/filelock` -- file-based locking
-- `pkg/proxy` -- HTTP/WebSocket reverse proxy, API key auth, TLS, security checks, log sanitization
-- `pkg/registry` -- session tracking
-- `pkg/settings` -- settings.json read/write/restore engine
-- `pkg/tokencache` -- generic token caching
+- `internal/core/authcheck` -- pre-flight auth verification
+- `internal/core/childproc` -- child process management
+- `internal/core/proxy` -- HTTP/WebSocket reverse proxy, API key auth, TLS, security checks, log sanitization
+- `internal/core/tokencache` -- generic token caching
+- `internal/core/{state,headless,lifecycle,portbind,health,refcount,updater,completion,cli}` -- the rest of the shared engine
+- `internal/cmd` -- command-tree parsing/help/completion library
+- `pkg/modeldiscovery`, `pkg/mdmprofile`, `pkg/websearch` -- the remaining Claude-coupled libraries (not promoted into core)
 
 ### External
 - None (pure Go stdlib)
