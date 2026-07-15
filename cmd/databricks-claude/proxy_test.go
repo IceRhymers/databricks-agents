@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IceRhymers/databricks-agents/pkg/tokencache"
+	"github.com/IceRhymers/databricks-agents/internal/core/tokencache"
 )
 
 // warmToken returns a *TokenProvider whose cache is pre-loaded with the given
