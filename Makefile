@@ -34,20 +34,29 @@ CERT_CN      ?= databricks-claude code signing (REPLACE FOR PROD)
 CERT_ORG     ?= databricks-claude self-signed (REPLACE FOR PROD)
 CERT_COUNTRY ?= US
 
+# All launcher binaries, lockstep-versioned (issue #204). The `databricks-agents`
+# multiplexer ships alongside the three per-tool binaries (named with the
+# `-agents` suffix so it never shadows the Databricks CLI on PATH). Order is
+# deterministic (kept explicit rather than a `./cmd/*` glob) so the claude
+# alias/.pkg special-casing below stays legible.
+BINS      := databricks-agents databricks-claude databricks-codex databricks-opencode
+# Cross-compile matrix for `dist`: os/arch pairs.
+PLATFORMS := darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64
+
 .DEFAULT_GOAL := build
 
 ## Build the databricks-claude binary (and the credential-helper alias that
 ## the Claude Desktop MDM artifacts expect — symlink on Unix, hard link on
 ## Windows) plus the databricks-codex and databricks-opencode binaries. codex
 ## and opencode have no credential-helper surface, so they get a plain
-## `go build` with no alias step. The `databricks` multiplexer dispatches to
-## the three per-tool binaries; its cross-compile/packaging matrix is #204.
+## `go build` with no alias step. The `databricks-agents` multiplexer dispatches
+## to the three per-tool binaries and is cross-compiled alongside them by `dist`.
 build:
 	go build -ldflags="$(LDFLAGS)" -o databricks-claude$(EXE) ./cmd/databricks-claude
 	$(LINK_ALIAS)
 	go build -ldflags="$(LDFLAGS)" -o databricks-codex$(EXE) ./cmd/databricks-codex
 	go build -ldflags="$(LDFLAGS)" -o databricks-opencode$(EXE) ./cmd/databricks-opencode
-	go build -ldflags="$(LDFLAGS)" -o databricks$(EXE) ./cmd/databricks
+	go build -ldflags="$(LDFLAGS)" -o databricks-agents$(EXE) ./cmd/databricks-agents
 
 ## Install to GOPATH/bin (also drops the credential-helper alias so Claude
 ## Desktop's inferenceCredentialHelper can target a stable path). codex
@@ -57,38 +66,40 @@ install:
 	$(INSTALL_LINK_ALIAS)
 	go install -ldflags="$(LDFLAGS)" ./cmd/databricks-codex
 	go install -ldflags="$(LDFLAGS)" ./cmd/databricks-opencode
-	go install -ldflags="$(LDFLAGS)" ./cmd/databricks
+	go install -ldflags="$(LDFLAGS)" ./cmd/databricks-agents
 
 ## Run tests with verbose output
 test:
 	go test ./... -v
 
-## Cross-compile for linux/darwin/windows amd64 + arm64. Symlinks for the
+## Cross-compile every launcher in $(BINS) — the `databricks-agents` multiplexer plus
+## databricks-claude/-codex/-opencode — for linux/darwin/windows amd64 + arm64
+## (24 artifacts, lockstep-versioned per issue #204). Symlinks for the
 ## credential-helper alias are NOT generated here — packagers (brew, .pkg,
 ## .deb) are responsible for creating them at install time pointing at a
-## predictable system path. databricks-codex and databricks-opencode ship the
-## same 6 targets alongside databricks-claude — no credential-helper alias, no
-## .pkg/MDM surface (both are CLI-only).
+## predictable system path. codex, opencode, and the multiplexer have no
+## credential-helper alias and no .pkg/MDM surface (all CLI-only).
+##
+## Implemented as a shell `for` loop with `set -e` (NOT a make `$(foreach)`,
+## which would collapse all builds onto one recipe line whose exit status is
+## only the last command's — silently masking a mid-loop build failure and
+## shipping a partial artifact set). `set -e` restores fail-fast so a red
+## build fails the release. IMPORTANT: the loop MUST stay a single
+## backslash-continued logical line so `set -e` governs one shell invocation;
+## breaking the continuations would make `set -e` per-line and reopen the
+## partial-release hazard. This target is Unix-only by construction — the shell
+## `for`/`set -e`/`$${p%/*}` syntax and `mkdir -p` can't run under the Windows
+## `cmd.exe` SHELL — and only runs on ubuntu CI runners.
 dist:
 	mkdir -p dist
-	GOOS=darwin  GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-darwin-arm64  ./cmd/databricks-claude
-	GOOS=darwin  GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-darwin-amd64  ./cmd/databricks-claude
-	GOOS=linux   GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-linux-amd64   ./cmd/databricks-claude
-	GOOS=linux   GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-linux-arm64   ./cmd/databricks-claude
-	GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-windows-amd64.exe ./cmd/databricks-claude
-	GOOS=windows GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-claude-windows-arm64.exe ./cmd/databricks-claude
-	GOOS=darwin  GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-codex-darwin-arm64  ./cmd/databricks-codex
-	GOOS=darwin  GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-codex-darwin-amd64  ./cmd/databricks-codex
-	GOOS=linux   GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-codex-linux-amd64   ./cmd/databricks-codex
-	GOOS=linux   GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-codex-linux-arm64   ./cmd/databricks-codex
-	GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-codex-windows-amd64.exe ./cmd/databricks-codex
-	GOOS=windows GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-codex-windows-arm64.exe ./cmd/databricks-codex
-	GOOS=darwin  GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-opencode-darwin-arm64  ./cmd/databricks-opencode
-	GOOS=darwin  GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-opencode-darwin-amd64  ./cmd/databricks-opencode
-	GOOS=linux   GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-opencode-linux-amd64   ./cmd/databricks-opencode
-	GOOS=linux   GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-opencode-linux-arm64   ./cmd/databricks-opencode
-	GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-opencode-windows-amd64.exe ./cmd/databricks-opencode
-	GOOS=windows GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o dist/databricks-opencode-windows-arm64.exe ./cmd/databricks-opencode
+	set -e; for bin in $(BINS); do \
+		for p in $(PLATFORMS); do \
+			os=$${p%/*}; arch=$${p#*/}; ext=; \
+			if [ "$$os" = windows ]; then ext=.exe; fi; \
+			echo "building $$bin $$os/$$arch"; \
+			GOOS=$$os GOARCH=$$arch go build -ldflags="$(LDFLAGS)" -o dist/$$bin-$$os-$$arch$$ext ./cmd/$$bin; \
+		done; \
+	done
 
 ## Build a universal2 macOS .pkg installer. Set APPLE_INTERNAL_SIGNING_IDENTITY
 ## to codesign the binary inside the pkg with hardened-runtime flags; otherwise
@@ -176,7 +187,7 @@ generate-signing-cert:
 
 ## Remove build artifacts
 clean:
-	rm -f databricks-claude databricks-claude-credential-helper databricks-codex databricks-opencode databricks$(EXE)
+	rm -f databricks-claude databricks-claude-credential-helper databricks-codex databricks-opencode databricks-agents$(EXE)
 	rm -rf dist/ build/ root/ scripts/postinstall
 
 ## Run go vet

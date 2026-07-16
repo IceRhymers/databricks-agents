@@ -52,7 +52,7 @@ func TestDelegate_Fidelity(t *testing.T) {
 	dir := t.TempDir()
 
 	// Build the multiplexer (current package) into dir.
-	mux := filepath.Join(dir, "databricks")
+	mux := filepath.Join(dir, "databricks-agents")
 	build(t, mux, ".")
 
 	// Build a stub sibling that echoes argv[0]/args/env and exits with $DBX_EXIT.

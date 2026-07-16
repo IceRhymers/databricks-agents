@@ -51,10 +51,10 @@ func TestGenerateBash_Structure(t *testing.T) {
 		}
 	}
 	// The multiplexer's own wrapper + registration.
-	if !strings.Contains(script, "_databricks() {") {
-		t.Error("bash script missing _databricks wrapper")
+	if !strings.Contains(script, "_databricks_agents() {") {
+		t.Error("bash script missing _databricks_agents wrapper")
 	}
-	if !strings.Contains(script, "complete -F _databricks databricks\n") {
+	if !strings.Contains(script, "complete -F _databricks_agents databricks-agents\n") {
 		t.Error("bash script missing multiplexer registration")
 	}
 	// Position-1 offers agent names + reserved words.
@@ -95,8 +95,8 @@ func TestGenerateZsh_Structure(t *testing.T) {
 	})
 	script := generateZsh()
 
-	if !strings.HasPrefix(script, "#compdef databricks\n") {
-		t.Error("zsh script missing #compdef databricks header")
+	if !strings.HasPrefix(script, "#compdef databricks-agents\n") {
+		t.Error("zsh script missing #compdef databricks-agents header")
 	}
 	for _, a := range agents {
 		fn := siblingFuncName(a.Binary)
@@ -111,7 +111,7 @@ func TestGenerateZsh_Structure(t *testing.T) {
 			t.Errorf("zsh script leaked sibling invocation for %q", a.Binary)
 		}
 	}
-	if !strings.Contains(script, "_databricks \"$@\"\n") {
+	if !strings.Contains(script, "_databricks_agents \"$@\"\n") {
 		t.Error("zsh script missing multiplexer invocation")
 	}
 }
@@ -151,9 +151,9 @@ func TestBashCompletion_Functional(t *testing.T) {
 
 	driver := `
 source "` + scriptPath + `"
-COMP_WORDS=(databricks claude serve "")
+COMP_WORDS=(databricks-agents claude serve "")
 COMP_CWORD=3
-_databricks
+_databricks_agents
 echo "REPLY:${COMPREPLY[*]}"
 `
 	out, err := exec.Command(bashPath, "-c", driver).CombinedOutput()

@@ -26,7 +26,7 @@ func delegate(path string, args []string) int {
 	cmd.Env = os.Environ()
 
 	if err := cmd.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "databricks: exec %s: %v\n", path, err)
+		fmt.Fprintf(os.Stderr, "databricks-agents: exec %s: %v\n", path, err)
 		return 1
 	}
 
@@ -49,6 +49,6 @@ func delegate(path string, args []string) int {
 	if errors.As(err, &exitErr) {
 		return exitErr.ExitCode()
 	}
-	fmt.Fprintf(os.Stderr, "databricks: %v\n", err)
+	fmt.Fprintf(os.Stderr, "databricks-agents: %v\n", err)
 	return 1
 }

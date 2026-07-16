@@ -15,7 +15,7 @@ import (
 // through to PATH when os.Executable() errors, returns a non-absolute path, or
 // the co-located file is absent; PATH keeps dispatch correct on layouts where
 // the binaries aren't co-located (at the cost of possible version skew, which
-// #204's lockstep packaging addresses).
+// the unified lockstep release addresses).
 func resolveBinary(binary string) (string, error) {
 	file := binaryFileName(binary)
 
