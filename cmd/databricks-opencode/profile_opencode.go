@@ -153,7 +153,7 @@ func OpencodeProfile(patcher profile.SettingsPatcher) profile.Profile {
 		Name:           ProfileName,
 		ChildBinary:    "opencode",
 		ConfigPath:     opencodeConfigPath,
-		GatewayPath:    "/ai-gateway/anthropic",
+		GatewayPath:    gatewayPath,
 		PatchSettings:  patcher,
 		DaemonStrategy: opencodeDaemon{},
 		HookInstaller:  opencodeHooks{},

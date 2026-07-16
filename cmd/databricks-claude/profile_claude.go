@@ -161,7 +161,7 @@ func ClaudeProfile() profile.Profile {
 		Name:           ProfileName,
 		ChildBinary:    "claude",
 		ConfigPath:     claudeSettingsPath,
-		GatewayPath:    "/ai-gateway/anthropic",
+		GatewayPath:    gatewayPath,
 		PatchSettings:  claudeSettingsPatcher{},
 		DaemonStrategy: claudeDaemon{},
 		HookInstaller:  claudeHooks{},

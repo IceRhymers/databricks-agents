@@ -23,7 +23,20 @@ type Profile struct {
 	// unresolvable.
 	ConfigPath func() (string, error)
 	// GatewayPath is the AI Gateway URL suffix appended to the Databricks host
-	// (e.g. "/ai-gateway/anthropic").
+	// (e.g. "/ai-gateway/anthropic"). Each launcher sets it from its own
+	// gatewayPath const, so the const is the single source of truth (#218).
+	//
+	// API-shape-only: nothing outside tests reads this field. The launch paths
+	// call their own ConstructGatewayURL (which joins via dbxauth.GatewayURL)
+	// rather than reading it here — some of those call sites have no Profile to
+	// read it from.
+	//
+	// SINGLE-VALUED — do not "fix" this by making it the sole source. opencode
+	// has two upstreams (Anthropic on the catch-all and Gemini Native on
+	// /v1beta); only the Anthropic path is representable here, so wiring this
+	// field as authoritative would silently drop opencode's Gemini route. If a
+	// real consumer ever needs the gateway path, model the multi-upstream case
+	// first.
 	GatewayPath string
 	// PatchSettings mutates the tool's settings file to point at the proxy.
 	PatchSettings SettingsPatcher

@@ -195,7 +195,7 @@ func CodexProfile(patcher profile.SettingsPatcher) profile.Profile {
 		Name:           ProfileName,
 		ChildBinary:    "codex",
 		ConfigPath:     codexConfigPath,
-		GatewayPath:    "/ai-gateway/openai/v1",
+		GatewayPath:    gatewayPath,
 		PatchSettings:  patcher,
 		DaemonStrategy: codexDaemon{},
 		HookInstaller:  codexHooks{},
