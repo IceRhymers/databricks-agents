@@ -240,7 +240,11 @@ func TestRunCredentialHelper_ColdCache_LoginFail(t *testing.T) {
 // the CLI unresolvable and the test fails — which is the entire point of the pin.
 func TestCredentialHelper_HonorsStateDatabricksCLIPath(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("chmod 0o755 not portable on windows")
+		// The mock is reached via an absolute state.DatabricksCLIPath, which
+		// cli.ResolveDatabricksCLI short-circuits, so this does not actually
+		// depend on the unix-only permission-bit tiers. Skipped only because
+		// CI is linux-only and the Windows path is unverified.
+		t.Skip("windows path unverified: CI is linux-only")
 	}
 	const token = "dapi-from-state-cli-path"
 	bin := buildHelperBinary(t, `{"access_token":"`+token+`","token_type":"Bearer","expiry":"2099-01-01T00:00:00Z"}`, 0)

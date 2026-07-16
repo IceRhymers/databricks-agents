@@ -151,7 +151,10 @@ func validTokenJSON(tok, expiry string) string {
 
 func TestFetchToken_HonorsDATABRICKS_CLI(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("chmod 0o755 not portable on windows")
+		// cli.IsExecutableFile gates the $DATABRICKS_CLI tier on unix permission
+		// bits (mode&0o111). Windows files carry none, so that tier can never
+		// fire there and this probe has nothing to assert.
+		t.Skip("$DATABRICKS_CLI tier is unix-only: gated on permission bits")
 	}
 	bin := buildHelperBinary(t, validTokenJSON("tok-env", futureExpiry()), 0)
 	t.Setenv("DATABRICKS_CLI", bin)
@@ -171,7 +174,8 @@ func TestFetchToken_HonorsDATABRICKS_CLI(t *testing.T) {
 
 func TestDiscoverHost_HonorsDATABRICKS_CLI(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("chmod 0o755 not portable on windows")
+		// Same as above: the $DATABRICKS_CLI tier is gated on unix permission bits.
+		t.Skip("$DATABRICKS_CLI tier is unix-only: gated on permission bits")
 	}
 	bin := buildAuthEnvBinary(t, `{"env":{"DATABRICKS_HOST":"https://env.example.com"}}`, 0)
 	t.Setenv("DATABRICKS_CLI", bin)
