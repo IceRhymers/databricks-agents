@@ -43,7 +43,7 @@ func TestRun_Help(t *testing.T) {
 		if code != 0 {
 			t.Errorf("%s: exit = %d, want 0", arg, code)
 		}
-		if !strings.Contains(stdout, "databricks <agent>") {
+		if !strings.Contains(stdout, "databricks-agents <agent>") {
 			t.Errorf("%s: stdout missing usage, got %q", arg, stdout)
 		}
 	}
@@ -54,7 +54,7 @@ func TestRun_Version(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("--version: exit = %d, want 0", code)
 	}
-	if !strings.Contains(stdout, "databricks ") {
+	if !strings.Contains(stdout, "databricks-agents ") {
 		t.Errorf("--version: stdout = %q, want it to contain the version", stdout)
 	}
 }

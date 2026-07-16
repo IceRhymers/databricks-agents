@@ -20,7 +20,7 @@ import (
 func delegate(path string, args []string) int {
 	argv := append([]string{path}, args...)
 	if err := syscall.Exec(path, argv, os.Environ()); err != nil {
-		fmt.Fprintf(os.Stderr, "databricks: exec %s: %v\n", path, err)
+		fmt.Fprintf(os.Stderr, "databricks-agents: exec %s: %v\n", path, err)
 		return 1
 	}
 	return 0 // unreachable on success

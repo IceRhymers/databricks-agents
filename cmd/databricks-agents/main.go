@@ -1,8 +1,10 @@
-// Command databricks is the ucode-style multiplexer over the per-tool wrapper
-// launchers. `databricks claude|codex|opencode [args]` dispatches to the
-// matching databricks-<agent> binary and behaves identically to invoking that
-// binary directly; `databricks list` enumerates the registered agents and
-// `databricks completion <shell>` emits nested shell completion.
+// Command databricks-agents is the ucode-style multiplexer over the per-tool
+// wrapper launchers. `databricks-agents claude|codex|opencode [args]` dispatches
+// to the matching databricks-<agent> binary and behaves identically to invoking
+// that binary directly; `databricks-agents list` enumerates the registered
+// agents and `databricks-agents completion <shell>` emits nested shell
+// completion. The binary is deliberately NOT named `databricks` so it never
+// shadows the Databricks CLI (which the wrappers shell out to) on PATH.
 //
 // Why exec-delegation rather than the issue's literal "argv[1] → registry →
 // core.Run": each launcher's full subcommand surface (config/serve/hooks/
@@ -10,7 +12,7 @@
 // own package main, which Go cannot import, and core.Run only executes the
 // default wrapper-launch path. Locating and exec-ing the real sibling binary
 // makes "behaves identically" definitional across the whole surface, while
-// leaving the three launchers untouched. See the "Key Files (cmd/databricks/)"
+// leaving the three launchers untouched. See the "Key Files (cmd/databricks-agents/)"
 // section of the repo-root AGENTS.md.
 package main
 
@@ -38,7 +40,7 @@ type agent struct {
 }
 
 // agents is the source of truth for dispatch, `list`, and completion. Kept
-// local to cmd/databricks (zero coupling); a future issue may promote it to an
+// local to cmd/databricks-agents (zero coupling); a future issue may promote it to an
 // internal/agents package if the release matrix ever needs the same list.
 var agents = []agent{
 	{"claude", "databricks-claude", "Claude Code via Databricks OAuth"},
@@ -76,7 +78,7 @@ func run(args []string) int {
 		fmt.Print(usage())
 		return 0
 	case "--version", "version":
-		fmt.Printf("databricks %s\n", Version)
+		fmt.Printf("databricks-agents %s\n", Version)
 		return 0
 	case "list":
 		printList(os.Stdout)
@@ -88,14 +90,14 @@ func run(args []string) int {
 	// Otherwise argv[0] is an agent name → delegate to its sibling binary.
 	a, ok := lookup(args[0])
 	if !ok {
-		fmt.Fprintf(os.Stderr, "databricks: unknown agent %q\n\nValid agents: %s\n",
+		fmt.Fprintf(os.Stderr, "databricks-agents: unknown agent %q\n\nValid agents: %s\n",
 			args[0], agentNames())
 		return 2
 	}
 
 	path, err := resolveBinary(a.Binary)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "databricks: %v\n", err)
+		fmt.Fprintf(os.Stderr, "databricks-agents: %v\n", err)
 		return 1
 	}
 	// delegate replaces the process (unix) or spawns + forwards (windows).
@@ -123,12 +125,12 @@ func agentNames() string {
 // usage returns the top-level help text.
 func usage() string {
 	var b strings.Builder
-	b.WriteString("databricks — multiplexer for Databricks-OAuth AI coding CLIs\n\n")
+	b.WriteString("databricks-agents — multiplexer for Databricks-OAuth AI coding CLIs\n\n")
 	b.WriteString("Usage:\n")
-	b.WriteString("  databricks <agent> [args...]   run a wrapped agent (identical to databricks-<agent> ...)\n")
-	b.WriteString("  databricks list                list registered agents\n")
-	b.WriteString("  databricks completion <shell>  emit shell completion (bash|zsh|fish)\n")
-	b.WriteString("  databricks --version           print version\n\n")
+	b.WriteString("  databricks-agents <agent> [args...]   run a wrapped agent (identical to databricks-<agent> ...)\n")
+	b.WriteString("  databricks-agents list                list registered agents\n")
+	b.WriteString("  databricks-agents completion <shell>  emit shell completion (bash|zsh|fish)\n")
+	b.WriteString("  databricks-agents --version           print version\n\n")
 	b.WriteString("Agents:\n")
 	for _, a := range agents {
 		fmt.Fprintf(&b, "  %-10s %s\n", a.Name, a.Summary)

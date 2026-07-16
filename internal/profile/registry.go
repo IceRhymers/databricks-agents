@@ -7,9 +7,9 @@ import "sort"
 // launcher is a separate `package main` that cannot import another's Profile —
 // init-registration into a shared Default cannot compose the multiplexer.
 //
-// The multiplexer (#203, cmd/databricks) resolved that constraint by NOT using
-// this type for dispatch: full Profile values aren't constructible in
-// cmd/databricks (their SettingsPatcher/DaemonStrategy/HookInstaller impls live
+// The multiplexer (#203, cmd/databricks-agents) resolved that constraint by NOT
+// using this type for dispatch: full Profile values aren't constructible in
+// cmd/databricks-agents (their SettingsPatcher/DaemonStrategy/HookInstaller impls live
 // in each launcher's package main), so it registers a lightweight local
 // name→binary→summary manifest and dispatches by exec-ing the sibling binary.
 // Registry therefore remains an API-shape-only deliverable for full Profiles —

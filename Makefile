@@ -34,11 +34,12 @@ CERT_CN      ?= databricks-claude code signing (REPLACE FOR PROD)
 CERT_ORG     ?= databricks-claude self-signed (REPLACE FOR PROD)
 CERT_COUNTRY ?= US
 
-# All launcher binaries, lockstep-versioned (issue #204). The `databricks`
-# multiplexer ships alongside the three per-tool binaries. Order is
+# All launcher binaries, lockstep-versioned (issue #204). The `databricks-agents`
+# multiplexer ships alongside the three per-tool binaries (named with the
+# `-agents` suffix so it never shadows the Databricks CLI on PATH). Order is
 # deterministic (kept explicit rather than a `./cmd/*` glob) so the claude
 # alias/.pkg special-casing below stays legible.
-BINS      := databricks databricks-claude databricks-codex databricks-opencode
+BINS      := databricks-agents databricks-claude databricks-codex databricks-opencode
 # Cross-compile matrix for `dist`: os/arch pairs.
 PLATFORMS := darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64
 
@@ -48,14 +49,14 @@ PLATFORMS := darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 win
 ## the Claude Desktop MDM artifacts expect — symlink on Unix, hard link on
 ## Windows) plus the databricks-codex and databricks-opencode binaries. codex
 ## and opencode have no credential-helper surface, so they get a plain
-## `go build` with no alias step. The `databricks` multiplexer dispatches to
-## the three per-tool binaries and is cross-compiled alongside them by `dist`.
+## `go build` with no alias step. The `databricks-agents` multiplexer dispatches
+## to the three per-tool binaries and is cross-compiled alongside them by `dist`.
 build:
 	go build -ldflags="$(LDFLAGS)" -o databricks-claude$(EXE) ./cmd/databricks-claude
 	$(LINK_ALIAS)
 	go build -ldflags="$(LDFLAGS)" -o databricks-codex$(EXE) ./cmd/databricks-codex
 	go build -ldflags="$(LDFLAGS)" -o databricks-opencode$(EXE) ./cmd/databricks-opencode
-	go build -ldflags="$(LDFLAGS)" -o databricks$(EXE) ./cmd/databricks
+	go build -ldflags="$(LDFLAGS)" -o databricks-agents$(EXE) ./cmd/databricks-agents
 
 ## Install to GOPATH/bin (also drops the credential-helper alias so Claude
 ## Desktop's inferenceCredentialHelper can target a stable path). codex
@@ -65,13 +66,13 @@ install:
 	$(INSTALL_LINK_ALIAS)
 	go install -ldflags="$(LDFLAGS)" ./cmd/databricks-codex
 	go install -ldflags="$(LDFLAGS)" ./cmd/databricks-opencode
-	go install -ldflags="$(LDFLAGS)" ./cmd/databricks
+	go install -ldflags="$(LDFLAGS)" ./cmd/databricks-agents
 
 ## Run tests with verbose output
 test:
 	go test ./... -v
 
-## Cross-compile every launcher in $(BINS) — the `databricks` multiplexer plus
+## Cross-compile every launcher in $(BINS) — the `databricks-agents` multiplexer plus
 ## databricks-claude/-codex/-opencode — for linux/darwin/windows amd64 + arm64
 ## (24 artifacts, lockstep-versioned per issue #204). Symlinks for the
 ## credential-helper alias are NOT generated here — packagers (brew, .pkg,
@@ -186,7 +187,7 @@ generate-signing-cert:
 
 ## Remove build artifacts
 clean:
-	rm -f databricks-claude databricks-claude-credential-helper databricks-codex databricks-opencode databricks$(EXE)
+	rm -f databricks-claude databricks-claude-credential-helper databricks-codex databricks-opencode databricks-agents$(EXE)
 	rm -rf dist/ build/ root/ scripts/postinstall
 
 ## Run go vet
