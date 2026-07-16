@@ -22,7 +22,7 @@ type logger struct {
 // Logf logs unconditionally. Use for lines that must survive a non-verbose run,
 // such as upstream errors.
 func (l logger) Logf(format string, args ...any) {
-	// Note: prefix goes through %s rather than being concatenated into the
+	// prefix travels as a %s argument rather than being concatenated into the
 	// format string, so a '%' in a tool name can never become a format verb.
 	log.Printf("%s: "+format, append([]any{l.prefix}, args...)...)
 }
