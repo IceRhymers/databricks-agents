@@ -1,8 +1,10 @@
 package state
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -92,5 +94,69 @@ func TestResolvePort(t *testing.T) {
 					tc.flagPort, tc.savedPort, tc.defaultPort, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSave_ConcurrentWrites verifies that two goroutines saving to the same
+// state file simultaneously produce a valid, uncorrupted file that matches
+// exactly one of the two payloads — never a torn mix of both.
+//
+// Assumes POSIX-atomic rename: on Windows, MoveFileEx(MOVEFILE_REPLACE_EXISTING)
+// can transiently return ERROR_ACCESS_DENIED on concurrent same-path renames.
+func TestSave_ConcurrentWrites(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	want1 := testState{Profile: "workspace-a", Port: 49153}
+	want2 := testState{Profile: "workspace-b", Port: 49154}
+
+	var wg sync.WaitGroup
+	var err1, err2 error
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		err1 = Save(path, want1)
+	}()
+	go func() {
+		defer wg.Done()
+		err2 = Save(path, want2)
+	}()
+	wg.Wait()
+
+	if err1 != nil {
+		t.Errorf("goroutine 1 Save error: %v", err1)
+	}
+	if err2 != nil {
+		t.Errorf("goroutine 2 Save error: %v", err2)
+	}
+
+	// The file must exist and parse cleanly. Read it directly rather than via
+	// Load, which swallows parse errors by design and would mask corruption.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	var got testState
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("state is not valid JSON after concurrent writes: %v\ncontent: %s", err, data)
+	}
+
+	// Whole-struct equality: a field-by-field check would let a torn write
+	// interleaving Profile from one writer with Port from the other slip past.
+	// Which writer wins is deliberately unasserted.
+	if got != want1 && got != want2 {
+		t.Errorf("state is %+v — matches neither %+v nor %+v; file is corrupt", got, want1, want2)
+	}
+
+	// No leftover temp files.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() != "state.json" {
+			t.Errorf("unexpected leftover file in dir: %s", e.Name())
+		}
 	}
 }

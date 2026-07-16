@@ -246,6 +246,67 @@ func TestLaunchModelRoutingFallback(t *testing.T) {
 	}
 }
 
+// TestSaveState_GoldenBytes pins saveState's exact on-disk output — byte
+// content and file mode — as a pre/post parity fixture for the #216 migration
+// of saveState onto internal/core/state. It is deliberately landed against the
+// unmodified writer so that it proves parity rather than merely restating the
+// new implementation; it MUST pass unmodified across the migration commit.
+//
+// The expected JSON is hardcoded on purpose: re-deriving it via
+// json.MarshalIndent here would tautologically mirror whatever saveState does
+// and assert nothing.
+func TestSaveState_GoldenBytes(t *testing.T) {
+	dir := t.TempDir()
+	orig := statePath
+	p := filepath.Join(dir, "state.json")
+	statePath = func() string { return p }
+	defer func() { statePath = orig }()
+
+	// Breadth: string, int, bool, and a nested pointer struct, with omitempty
+	// fields both set and unset. Field order follows struct declaration order.
+	in := persistentState{
+		Profile:              "aidev",
+		Port:                 49153,
+		OtelMetricsTable:     "cat.schema.claude_otel_metrics",
+		WithWebSearch:        true,
+		WebSearchFetchBudget: 65536,
+		Models:               &ModelRouting{Opus: "o", Sonnet: "s", Haiku: "h"},
+	}
+	if err := saveState(in); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	const want = `{
+  "profile": "aidev",
+  "port": 49153,
+  "otel_metrics_table": "cat.schema.claude_otel_metrics",
+  "with_websearch": true,
+  "websearch_fetch_budget": 65536,
+  "models": {
+    "opus": "o",
+    "sonnet": "s",
+    "haiku": "h"
+  }
+}
+`
+
+	got, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != want {
+		t.Errorf("on-disk bytes mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("file mode: got %#o, want %#o", perm, 0o600)
+	}
+}
+
 func TestSaveAndLoadState_WebSearch(t *testing.T) {
 	dir := t.TempDir()
 	orig := statePath

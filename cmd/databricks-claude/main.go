@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -479,63 +478,6 @@ func handlePrintEnv(profile, databricksHost, anthropicBaseURL, token, upstreamBi
 `, otelTracesTable)
 		}
 	}
-}
-
-// persistentConfigPath returns the path to the persistent config file.
-func persistentConfigPath(homeDir string) string {
-	return filepath.Join(homeDir, ".claude", ".databricks-claude.json")
-}
-
-// readPersistentConfig reads the persistent config file. Returns an empty map
-// if the file does not exist.
-func readPersistentConfig(path string) (map[string]interface{}, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return map[string]interface{}{}, nil
-		}
-		return nil, err
-	}
-	var cfg map[string]interface{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, err
-	}
-	return cfg, nil
-}
-
-// writePersistentConfig atomically writes the persistent config file.
-func writePersistentConfig(path string, cfg map[string]interface{}) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-
-	tmp, err := os.CreateTemp(dir, "config-*.json.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	if err := os.Chmod(tmpPath, 0o600); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	return os.Rename(tmpPath, path)
 }
 
 // deriveLogsTable derives the OTEL logs table name from the metrics table name.

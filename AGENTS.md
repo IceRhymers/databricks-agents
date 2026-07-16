@@ -11,12 +11,12 @@ Monorepo of transparent proxy wrappers that auto-refresh Databricks OAuth tokens
 
 | File | Description |
 |------|-------------|
-| `main.go` | Thin CLI entry point (#200): subcommand dispatch (completion/update/serve/desktop/setup/config/hooks/doctor + credential-helper alias), `parseArgs`, help/version, then `buildClaudeLaunchPlan(a)` → `core.Run(ClaudeProfile(), plan, a.ClaudeArgs)`. Retains shared package-`main` helpers (`envBlock`, `parseArgs`, `handleHelp`, `defaultModelRouting`, `launchModelRouting`, `databricksFullSetupEnv`, `buildUpdaterConfig`, `handlePrintEnv`, persistent-config helpers). No proxy/port/refcount/child logic remains here. |
+| `main.go` | Thin CLI entry point (#200): subcommand dispatch (completion/update/serve/desktop/setup/config/hooks/doctor + credential-helper alias), `parseArgs`, help/version, then `buildClaudeLaunchPlan(a)` → `core.Run(ClaudeProfile(), plan, a.ClaudeArgs)`. Retains shared package-`main` helpers (`envBlock`, `parseArgs`, `handleHelp`, `defaultModelRouting`, `launchModelRouting`, `databricksFullSetupEnv`, `buildUpdaterConfig`, `handlePrintEnv`). No proxy/port/refcount/child logic remains here. |
 | `launch_claude.go` | `buildClaudeLaunchPlan(a *Args) (core.LaunchPlan, error)` (#200): all claude-specific wrapper pre-flight — logging setup, settings.json read, profile resolution, auth (browser-login fallback, MUST precede token seed), startup security warnings, upstream/OTEL discovery, token seeding, port resolution, settings→state OTEL-table migration, TLS validation, websearch backend — plus the proxyURL-dependent `BuildEnv` closure (OTEL/`CLAUDE_*` env emission). Returns a neutral `core.LaunchPlan` for `core.Run`. |
 | `proxy.go` | Thin facade over `internal/core/proxy` (`ProxyConfig`, `NewProxyServer`, `StartProxy`, `recoveryHandler`). After #200 the launch path calls `proxy.NewServer` directly inside `core.Run`; this facade is retained for `proxy_test.go` cmd-level coverage. |
 | `token.go` | Facade over `internal/core/tokencache`: implements `databricksFetcher` (shells out to `databricks auth token`), host discovery via `databricks auth env`, and AI Gateway URL construction (`{host}/ai-gateway/anthropic`). Consumed by `buildClaudeLaunchPlan` (stays claude-side; a future issue may promote it into `internal/core`). |
 | `process.go` | Wraps `internal/core/childproc`: `ForwardSignals`. (`RunChild` removed in #200 — the launch path now calls `childproc.Run` directly inside `core.Run` with `BinaryName` from `profile.ChildBinary` and the managed marker from `LaunchPlan.ManagedEnvVar`.) |
-| `state.go` | `persistentState` struct and helpers for `~/.claude/.databricks-claude.json` (profile, port, CLI path, OTEL table names) |
+| `state.go` | `persistentState` struct for `~/.claude/.databricks-claude.json` (profile, port, CLI path, OTEL table names) plus `loadState`/`saveState`/`resolvePort` — thin facades over `internal/core/state` (#216) |
 | `hooks.go` | Session hook install/uninstall: `installHooks`, `uninstallHooks` |
 | `ensureconfig.go` | Bootstrap helpers for first-run settings patching |
 | `commands.go` | Source-of-truth `rootCommand` declaration plus `desktopCommand` / `setupCommand` / `configCommand` / `serveCommand` tree nodes (drives parsing, help, completion) |
@@ -35,7 +35,7 @@ Monorepo of transparent proxy wrappers that auto-refresh Databricks OAuth tokens
 | `serve_install_windows.go` | Windows Scheduled Task creation via `schtasks.exe` (build tag: `windows`) |
 | `serve_install_other.go` | Stub returning "unsupported platform" for non-darwin/linux/windows (build tag: `!darwin && !windows && !linux`) |
 | `desktop_config_test.go` | Tests for `buildMobileconfig`, `buildRegFile`, `buildDevModeJSON`, `writeDesktopConfigByPath`, `guardDevJSONOutputPath`, `writeFileAtomic`, install-instruction routing, and model-list consistency across all three artifacts |
-| `main_test.go` | Tests for `parseArgs`, `handlePrintEnv`, persistent config, `deriveLogsTable`, full integration scenarios |
+| `main_test.go` | Tests for `parseArgs`, `handleHelp`, `handlePrintEnv`, `deriveLogsTable`, `databricksFullSetupEnv`, `config write` bootstrap, `/shutdown` + idle-timeout lifecycle, and command-tree/completion parity |
 | `config_test.go` | Tests for `config` subcommand parity, OTEL orchestration matrix, websearch resolver, state-preservation invariant on `config otel disable` |
 | `doctor_test.go` | Tests for `diffModelRouting`'s status matrix (ok/drift/stale-legacy/unresolved/new) |
 | `process_test.go` | Tests for `ForwardSignals` signal forwarding and child exit-code propagation |
