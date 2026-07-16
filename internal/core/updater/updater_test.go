@@ -94,9 +94,20 @@ func TestCheck_CacheMiss(t *testing.T) {
 		t.Errorf("AssetURL = %q, want download URL", res.AssetURL)
 	}
 
-	// Verify cache was written.
-	if _, err := os.Stat(cacheFile); err != nil {
+	// Verify cache was written, including repo_slug. Without the slug assertion
+	// the write side is unpinned: an entry missing it mismatches on every read,
+	// turning the cache write-only and putting a GitHub API call on every
+	// startup (PrintUpdateNotice) against an unauthenticated 60/hr/IP limit.
+	data, err := os.ReadFile(cacheFile)
+	if err != nil {
 		t.Fatalf("cache file not created: %v", err)
+	}
+	var written cacheEntry
+	if err := json.Unmarshal(data, &written); err != nil {
+		t.Fatalf("parsing written cache: %v", err)
+	}
+	if written.RepoSlug != "test/repo" {
+		t.Errorf("written repo_slug = %q, want %q", written.RepoSlug, "test/repo")
 	}
 }
 
@@ -120,9 +131,11 @@ func TestCheck_CacheHit(t *testing.T) {
 	cacheDir := t.TempDir()
 	cacheFile := filepath.Join(cacheDir, "cache.json")
 
-	// Seed fresh cache.
+	// Seed fresh cache. RepoSlug must match the Config below — a foreign-repo
+	// entry is a miss (see TestCheck_CacheSlugMismatch).
 	entry := cacheEntry{
 		CheckedAt:     timeNow().UTC().Format(time.RFC3339),
+		RepoSlug:      "test/repo",
 		LatestVersion: "0.12.0",
 		ReleaseURL:    "https://github.com/test/repo/releases/tag/v0.12.0",
 		AssetURL:      "https://dl.example.com/cached",
@@ -179,9 +192,12 @@ func TestCheck_CacheExpired(t *testing.T) {
 	cacheDir := t.TempDir()
 	cacheFile := filepath.Join(cacheDir, "cache.json")
 
-	// Seed stale cache (25 hours old).
+	// Seed stale cache (25 hours old). RepoSlug matches the Config below, so
+	// expiry is the only reason this can miss — otherwise the test would pass
+	// on a slug mismatch and stop covering the TTL logic it exists to cover.
 	entry := cacheEntry{
 		CheckedAt:     timeNow().Add(-25 * time.Hour).UTC().Format(time.RFC3339),
+		RepoSlug:      "test/repo",
 		LatestVersion: "0.11.0",
 		ReleaseURL:    "https://github.com/test/repo/releases/tag/v0.11.0",
 		AssetURL:      "https://dl.example.com/old",

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -33,8 +34,17 @@ type Result struct {
 }
 
 // cacheEntry is the on-disk JSON schema for the cache file.
+//
+// RepoSlug records which repository the entry was fetched from. A cached answer
+// is only valid for the repo that produced it, so Check treats a slug mismatch
+// as a miss. Entries written before this field existed decode it as "" and are
+// therefore refetched once — which is the point: #217 repointed codex's and
+// opencode's RepoSlug away from their abandoned standalone repos, and without
+// this the stale entry would keep recommending a downgrade onto dead code for
+// up to CacheTTL after the upgrade.
 type cacheEntry struct {
 	CheckedAt     string `json:"checked_at"`
+	RepoSlug      string `json:"repo_slug"`
 	LatestVersion string `json:"latest_version"`
 	ReleaseURL    string `json:"release_url"`
 	AssetURL      string `json:"asset_url"`
@@ -64,8 +74,8 @@ func Check(ctx context.Context, cfg Config) (Result, error) {
 		cfg.CacheTTL = 24 * time.Hour
 	}
 
-	// Try reading cache first.
-	if entry, err := readCache(cfg.CacheFile); err == nil {
+	// Try reading cache first. An entry from a different repo is a miss, not a hit.
+	if entry, err := readCache(cfg.CacheFile); err == nil && entry.RepoSlug == cfg.RepoSlug {
 		checkedAt, parseErr := time.Parse(time.RFC3339, entry.CheckedAt)
 		if parseErr == nil && timeNow().Before(checkedAt.Add(cfg.CacheTTL)) {
 			return buildResult(cfg.CurrentVersion, entry.LatestVersion, entry.ReleaseURL, entry.AssetURL), nil
@@ -88,6 +98,7 @@ func Check(ctx context.Context, cfg Config) (Result, error) {
 	// Write cache (best-effort; errors returned to caller).
 	if err := writeCache(cfg.CacheFile, cacheEntry{
 		CheckedAt:     timeNow().UTC().Format(time.RFC3339),
+		RepoSlug:      cfg.RepoSlug,
 		LatestVersion: latestVersion,
 		ReleaseURL:    rel.HTMLURL,
 		AssetURL:      assetURL,
@@ -247,6 +258,43 @@ func PrintUpdateNotice(cfg Config) {
 	} else {
 		fmt.Fprintf(os.Stderr, "%s: update available (v%s). Run: %s update\n", cfg.BinaryName, r.LatestVersion, cfg.BinaryName)
 	}
+}
+
+// RunUpdateCommand implements the shared `update` subcommand: a forced check that
+// prints upgrade instructions to w and returns the process exit code.
+func RunUpdateCommand(cfg Config, w io.Writer) int {
+	if os.Getenv("DATABRICKS_NO_UPDATE_CHECK") == "1" {
+		fmt.Fprintf(w, "%s: update check disabled via DATABRICKS_NO_UPDATE_CHECK\n", cfg.BinaryName)
+		return 0
+	}
+	// TODO(#223): this is a no-op — Check reinterprets CacheTTL==0 as 24h, so
+	// `update` reads a cached result rather than forcing a fresh check. Preserved
+	// verbatim from the launchers; fixing it is a behavior change, not a consolidation.
+	cfg.CacheTTL = 0
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	r, err := Check(ctx, cfg)
+	if err != nil {
+		fmt.Fprintf(w, "%s: update check failed: %v\n", cfg.BinaryName, err)
+		return 1
+	}
+	return formatUpdate(cfg, r, w)
+}
+
+// formatUpdate renders a completed check. Pure: no I/O beyond w, no clock, no env.
+// Uses cfg.BinaryName for the display name and the Homebrew formula name, mirroring
+// PrintUpdateNotice.
+func formatUpdate(cfg Config, r Result, w io.Writer) int {
+	if !r.UpdateAvailable {
+		fmt.Fprintf(w, "%s v%s is already the latest version\n", cfg.BinaryName, cfg.CurrentVersion)
+		return 0
+	}
+	if r.IsHomebrew {
+		fmt.Fprintf(w, "Update available: v%s. Run: brew upgrade %s\n", r.LatestVersion, cfg.BinaryName)
+	} else {
+		fmt.Fprintf(w, "Update available: v%s. Download from: %s\n", r.LatestVersion, r.ReleaseURL)
+	}
+	return 0
 }
 
 // writeCache writes the cache file atomically (temp + rename).

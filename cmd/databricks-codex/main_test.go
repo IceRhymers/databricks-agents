@@ -921,3 +921,12 @@ func TestResolveModel_DefaultIsGpt5_5(t *testing.T) {
 		t.Errorf("resolveModel default = %q, want %q", got, want)
 	}
 }
+
+// TestBuildUpdaterConfig_RepoSlug pins the update check to this monorepo's remote.
+// The pre-monorepo standalone repo is abandoned; a silent rot back to it makes
+// `update` recommend a downgrade onto dead code.
+func TestBuildUpdaterConfig_RepoSlug(t *testing.T) {
+	if got := buildUpdaterConfig().RepoSlug; got != "IceRhymers/databricks-claude" {
+		t.Errorf("RepoSlug = %q, want %q", got, "IceRhymers/databricks-claude")
+	}
+}

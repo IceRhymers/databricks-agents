@@ -129,7 +129,7 @@ The tool-agnostic proxy/auth/gateway/token/state engine every launcher runs. Pro
 | `internal/core/refcount` | Atomic session reference counter with conditional-exit support |
 | `internal/core/state` | JSON-file state persistence helpers (atomic temp-file + rename) |
 | `internal/core/tokencache` | Mutex-guarded token cache with 5-min refresh buffer and fallback-on-error |
-| `internal/core/updater` | GitHub release checker with 24-hour cache and numeric semver comparison |
+| `internal/core/updater` | GitHub release checker with 24-hour cache and numeric semver comparison. Also hosts `RunUpdateCommand` (#217) — the shared `update` subcommand runner all three launchers' `update` blocks collapse to (`os.Exit(updater.RunUpdateCommand(buildUpdaterConfig(), os.Stderr))`); it returns the exit code rather than calling `os.Exit`, and writes to an injected `io.Writer`, so it's testable in-process. The pure `formatUpdate` renders a completed `Result`. `buildUpdaterConfig` stays per-launcher — `CacheFile` and `BinaryName` differ; `RepoSlug` is uniform (`IceRhymers/databricks-claude`) since #217 repointed codex and opencode off their abandoned standalone repos, pinned by a `TestBuildUpdaterConfig_RepoSlug` per launcher. `cacheEntry.repo_slug` scopes a cached answer to the repo that produced it, so the repoint takes effect immediately rather than after the 24h TTL. |
 
 ### Library packages (`pkg/`)
 

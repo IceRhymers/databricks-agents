@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"os"
@@ -64,29 +63,7 @@ func main() {
 
 	// update — force-check for a newer release and print instructions.
 	if len(os.Args) >= 2 && os.Args[1] == "update" {
-		if os.Getenv("DATABRICKS_NO_UPDATE_CHECK") == "1" {
-			fmt.Fprintln(os.Stderr, "databricks-codex: update check disabled via DATABRICKS_NO_UPDATE_CHECK")
-			os.Exit(0)
-		}
-		cfg := buildUpdaterConfig()
-		cfg.CacheTTL = 0 // force fresh check
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		r, err := updater.Check(ctx, cfg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "databricks-codex: update check failed: %v\n", err)
-			os.Exit(1)
-		}
-		if !r.UpdateAvailable {
-			fmt.Fprintf(os.Stderr, "databricks-codex v%s is already the latest version\n", Version)
-			os.Exit(0)
-		}
-		if r.IsHomebrew {
-			fmt.Fprintf(os.Stderr, "Update available: v%s. Run: brew upgrade databricks-codex\n", r.LatestVersion)
-		} else {
-			fmt.Fprintf(os.Stderr, "Update available: v%s. Download from: %s\n", r.LatestVersion, r.ReleaseURL)
-		}
-		os.Exit(0)
+		os.Exit(updater.RunUpdateCommand(buildUpdaterConfig(), os.Stderr))
 	}
 
 	a, err := parseArgs(os.Args[1:])
@@ -325,7 +302,7 @@ Passthrough to codex:
 func buildUpdaterConfig() updater.Config {
 	home, _ := os.UserHomeDir()
 	return updater.Config{
-		RepoSlug:       "IceRhymers/databricks-codex",
+		RepoSlug:       "IceRhymers/databricks-claude",
 		CurrentVersion: Version,
 		BinaryName:     "databricks-codex",
 		CacheFile:      filepath.Join(home, ".codex", ".update-check.json"),
