@@ -6,11 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/IceRhymers/databricks-agents/internal/core"
+	"github.com/IceRhymers/databricks-agents/internal/core/cli"
 	"github.com/IceRhymers/databricks-agents/internal/core/completion"
 	"github.com/IceRhymers/databricks-agents/internal/core/updater"
 )
@@ -129,127 +129,37 @@ type Args struct {
 // recognised here — they will fall through to CodexArgs and be forwarded to
 // the wrapped codex binary. Users should migrate to `databricks-codex serve
 // [--idle-timeout D]`.
+// newParseSpec builds the cli.Spec that maps databricks-codex's root flags to
+// their destination fields on a. knownFlags (completion_flags.go, derived from
+// flagDefs) is the authoritative known-vs-passthrough gate; the binding table
+// below must cover it exactly — TestBindingsCoverKnownFlags enforces that
+// structurally (superseding the now-dormant grep-based parity check).
+func newParseSpec(a *Args) cli.Spec {
+	return cli.Spec{
+		Known:      knownFlags,
+		Shorthands: map[string]string{"-h": "--help", "-v": "--verbose"},
+		Residual:   &a.CodexArgs,
+		Bindings: map[string]cli.Binding{
+			"--profile":         {Str: &a.Profile},
+			"--upstream":        {Str: &a.Upstream},
+			"--log-file":        {Str: &a.LogFile},
+			"--proxy-api-key":   {Str: &a.ProxyAPIKey},
+			"--tls-cert":        {Str: &a.TLSCert},
+			"--tls-key":         {Str: &a.TLSKey},
+			"--model":           {Str: &a.Model, OnSet: func() { a.ModelSet = true }},
+			"--port":            {Int: &a.PortFlag},
+			"--verbose":         {Bool: &a.Verbose},
+			"--version":         {Bool: &a.Version},
+			"--help":            {Bool: &a.ShowHelp},
+			"--no-update-check": {Bool: &a.NoUpdateCheck},
+		},
+	}
+}
+
 func parseArgs(args []string) (*Args, error) {
 	a := &Args{}
-
-	// knownFlags is defined at package level in completion_flags.go,
-	// derived from flagDefs so completions and parsing stay in sync.
-
-	i := 0
-	for i < len(args) {
-		arg := args[i]
-
-		// Explicit separator: everything after "--" goes to codex.
-		if arg == "--" {
-			a.CodexArgs = append(a.CodexArgs, args[i+1:]...)
-			return a, nil
-		}
-
-		if arg == "-h" {
-			a.ShowHelp = true
-			i++
-			continue
-		}
-		if arg == "-v" {
-			a.Verbose = true
-			i++
-			continue
-		}
-
-		if strings.HasPrefix(arg, "--") {
-			name := arg
-			value := ""
-			if eqIdx := strings.Index(arg, "="); eqIdx >= 0 {
-				name = arg[:eqIdx]
-				value = arg[eqIdx+1:]
-			}
-
-			if knownFlags[name] {
-				switch name {
-				case "--upstream":
-					if value != "" {
-						a.Upstream = value
-					} else if i+1 < len(args) {
-						i++
-						a.Upstream = args[i]
-					}
-				case "--log-file":
-					if value != "" {
-						a.LogFile = value
-					} else if i+1 < len(args) {
-						i++
-						a.LogFile = args[i]
-					}
-				case "--profile":
-					if value != "" {
-						a.Profile = value
-					} else if i+1 < len(args) {
-						i++
-						a.Profile = args[i]
-					}
-				case "--proxy-api-key":
-					if value != "" {
-						a.ProxyAPIKey = value
-					} else if i+1 < len(args) {
-						i++
-						a.ProxyAPIKey = args[i]
-					}
-				case "--tls-cert":
-					if value != "" {
-						a.TLSCert = value
-					} else if i+1 < len(args) {
-						i++
-						a.TLSCert = args[i]
-					}
-				case "--tls-key":
-					if value != "" {
-						a.TLSKey = value
-					} else if i+1 < len(args) {
-						i++
-						a.TLSKey = args[i]
-					}
-				case "--model":
-					if value != "" {
-						a.Model = value
-						a.ModelSet = true
-					} else if i+1 < len(args) {
-						i++
-						a.Model = args[i]
-						a.ModelSet = true
-					}
-				case "--verbose":
-					a.Verbose = true
-				case "--version":
-					a.Version = true
-				case "--help":
-					a.ShowHelp = true
-				case "--port":
-					if value != "" {
-						a.PortFlag, _ = strconv.Atoi(value)
-					} else if i+1 < len(args) {
-						i++
-						a.PortFlag, _ = strconv.Atoi(args[i])
-					}
-				case "--no-update-check":
-					a.NoUpdateCheck = true
-				default:
-					// A name in knownFlags must have a corresponding case
-					// above; this arm catches the case where rootCommand
-					// declares a new flag but parseArgs hasn't been updated.
-					// Loud failure beats silent passthrough — the bidirectional
-					// parity test in main_test.go also detects this drift,
-					// but a runtime check catches it for any caller path the
-					// test doesn't exercise.
-					return nil, fmt.Errorf("internal: %s is a known flag but parseArgs has no case for it", name)
-				}
-				i++
-				continue
-			}
-		}
-
-		// Not a known flag — pass through to codex.
-		a.CodexArgs = append(a.CodexArgs, arg)
-		i++
+	if err := cli.ParseFlags(args, newParseSpec(a)); err != nil {
+		return nil, err
 	}
 	return a, nil
 }

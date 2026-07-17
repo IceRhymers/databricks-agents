@@ -5,12 +5,11 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/IceRhymers/databricks-agents/internal/cmd"
 	"github.com/IceRhymers/databricks-agents/internal/core"
+	"github.com/IceRhymers/databricks-agents/internal/core/cli"
 	"github.com/IceRhymers/databricks-agents/internal/core/completion"
 	"github.com/IceRhymers/databricks-agents/internal/core/updater"
 )
@@ -117,118 +116,38 @@ type Args struct {
 // Args.IdleTimeout zero; the `serve` dispatcher populates them. Anything that
 // looks like --headless / --idle-timeout at the root falls through to opencode
 // (the transparent-passthrough behaviour the wrapper applies to unknown flags).
+// newParseSpec builds the cli.Spec that maps databricks-opencode's root flags
+// to their destination fields on a. knownFlags (completion_flags.go, derived
+// from flagDefs) is the authoritative known-vs-passthrough gate; the binding
+// table below must cover it exactly — TestBindingsCoverKnownFlags enforces that
+// structurally (superseding the now-dormant grep-based
+// TestParseArgsCasesAreDeclaredInRootTree).
+func newParseSpec(a *Args) cli.Spec {
+	return cli.Spec{
+		Known:      knownFlags,
+		Shorthands: map[string]string{"-h": "--help", "-v": "--verbose"},
+		Residual:   &a.OpencodeArgs,
+		Bindings: map[string]cli.Binding{
+			"--profile":         {Str: &a.Profile},
+			"--upstream":        {Str: &a.Upstream},
+			"--log-file":        {Str: &a.LogFile},
+			"--proxy-api-key":   {Str: &a.ProxyAPIKey},
+			"--tls-cert":        {Str: &a.TLSCert},
+			"--tls-key":         {Str: &a.TLSKey},
+			"--model":           {Str: &a.Model},
+			"--port":            {Int: &a.Port},
+			"--verbose":         {Bool: &a.Verbose},
+			"--version":         {Bool: &a.Version},
+			"--help":            {Bool: &a.ShowHelp},
+			"--no-update-check": {Bool: &a.NoUpdateCheck},
+		},
+	}
+}
+
 func parseArgs(args []string) (*Args, error) {
 	a := &Args{}
-
-	// knownFlags is defined at package level in completion_flags.go,
-	// derived from flagDefs so completions and parsing stay in sync.
-
-	i := 0
-	for i < len(args) {
-		arg := args[i]
-
-		// Explicit separator: everything after "--" goes to opencode.
-		if arg == "--" {
-			a.OpencodeArgs = append(a.OpencodeArgs, args[i+1:]...)
-			return a, nil
-		}
-
-		if arg == "-h" {
-			a.ShowHelp = true
-			i++
-			continue
-		}
-		if arg == "-v" {
-			a.Verbose = true
-			i++
-			continue
-		}
-
-		if strings.HasPrefix(arg, "--") {
-			name := arg
-			value := ""
-			if eqIdx := strings.Index(arg, "="); eqIdx >= 0 {
-				name = arg[:eqIdx]
-				value = arg[eqIdx+1:]
-			}
-
-			if knownFlags[name] {
-				switch name {
-				case "--model":
-					if value != "" {
-						a.Model = value
-					} else if i+1 < len(args) {
-						i++
-						a.Model = args[i]
-					}
-				case "--upstream":
-					if value != "" {
-						a.Upstream = value
-					} else if i+1 < len(args) {
-						i++
-						a.Upstream = args[i]
-					}
-				case "--log-file":
-					if value != "" {
-						a.LogFile = value
-					} else if i+1 < len(args) {
-						i++
-						a.LogFile = args[i]
-					}
-				case "--profile":
-					if value != "" {
-						a.Profile = value
-					} else if i+1 < len(args) {
-						i++
-						a.Profile = args[i]
-					}
-				case "--proxy-api-key":
-					if value != "" {
-						a.ProxyAPIKey = value
-					} else if i+1 < len(args) {
-						i++
-						a.ProxyAPIKey = args[i]
-					}
-				case "--tls-cert":
-					if value != "" {
-						a.TLSCert = value
-					} else if i+1 < len(args) {
-						i++
-						a.TLSCert = args[i]
-					}
-				case "--tls-key":
-					if value != "" {
-						a.TLSKey = value
-					} else if i+1 < len(args) {
-						i++
-						a.TLSKey = args[i]
-					}
-				case "--port":
-					if value != "" {
-						a.Port, _ = strconv.Atoi(value)
-					} else if i+1 < len(args) {
-						i++
-						a.Port, _ = strconv.Atoi(args[i])
-					}
-				case "--verbose":
-					a.Verbose = true
-				case "--version":
-					a.Version = true
-				case "--help":
-					a.ShowHelp = true
-				case "--no-update-check":
-					a.NoUpdateCheck = true
-				default:
-					return nil, fmt.Errorf("internal: %s is a known flag but parseArgs has no case for it", name)
-				}
-				i++
-				continue
-			}
-		}
-
-		// Not a known flag — pass through to opencode.
-		a.OpencodeArgs = append(a.OpencodeArgs, arg)
-		i++
+	if err := cli.ParseFlags(args, newParseSpec(a)); err != nil {
+		return nil, err
 	}
 	return a, nil
 }

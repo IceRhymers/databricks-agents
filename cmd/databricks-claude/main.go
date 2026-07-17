@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -201,120 +200,37 @@ func envBlock(doc map[string]interface{}) map[string]interface{} {
 //
 // #174 removed --headless and --idle-timeout — they live behind
 // `serve --session-mode` now. Same "removed, not aliased" semantics.
+// newParseSpec builds the cli.Spec that maps databricks-claude's root flags to
+// their destination fields on a. knownFlags (completion_flags.go, derived from
+// flagDefs) is the authoritative known-vs-passthrough gate; the binding table
+// below must cover it exactly — TestBindingsCoverKnownFlags enforces that
+// structurally (superseding the now-dormant grep-based
+// TestParseArgsCasesAreDeclaredInRootTree).
+func newParseSpec(a *Args) cli.Spec {
+	return cli.Spec{
+		Known:      knownFlags,
+		Shorthands: map[string]string{"-h": "--help", "-v": "--verbose"},
+		Residual:   &a.ClaudeArgs,
+		Bindings: map[string]cli.Binding{
+			"--profile":         {Str: &a.Profile},
+			"--upstream":        {Str: &a.Upstream},
+			"--log-file":        {Str: &a.LogFile},
+			"--proxy-api-key":   {Str: &a.ProxyAPIKey},
+			"--tls-cert":        {Str: &a.TLSCert},
+			"--tls-key":         {Str: &a.TLSKey},
+			"--port":            {Int: &a.Port},
+			"--verbose":         {Bool: &a.Verbose},
+			"--version":         {Bool: &a.Version},
+			"--help":            {Bool: &a.ShowHelp},
+			"--no-update-check": {Bool: &a.NoUpdateCheck},
+		},
+	}
+}
+
 func parseArgs(args []string) (*Args, error) {
 	a := &Args{}
-
-	// knownFlags is defined at package level in completion_flags.go,
-	// derived from flagDefs so completions and parsing stay in sync.
-
-	i := 0
-	for i < len(args) {
-		arg := args[i]
-
-		// Explicit separator: everything after "--" goes to claude.
-		if arg == "--" {
-			a.ClaudeArgs = append(a.ClaudeArgs, args[i+1:]...)
-			return a, nil
-		}
-
-		// Special case: -h is a short flag for --help, -v for --verbose.
-		if arg == "-h" {
-			a.ShowHelp = true
-			i++
-			continue
-		}
-		if arg == "-v" {
-			a.Verbose = true
-			i++
-			continue
-		}
-
-		// Check if it's a known databricks-claude flag.
-		if strings.HasPrefix(arg, "--") {
-			// Handle --flag=value form.
-			name := arg
-			value := ""
-			if eqIdx := strings.Index(arg, "="); eqIdx >= 0 {
-				name = arg[:eqIdx]
-				value = arg[eqIdx+1:]
-			}
-
-			if knownFlags[name] {
-				switch name {
-				case "--profile":
-					if value != "" {
-						a.Profile = value
-					} else if i+1 < len(args) {
-						i++
-						a.Profile = args[i]
-					}
-				case "--upstream":
-					if value != "" {
-						a.Upstream = value
-					} else if i+1 < len(args) {
-						i++
-						a.Upstream = args[i]
-					}
-				case "--log-file":
-					if value != "" {
-						a.LogFile = value
-					} else if i+1 < len(args) {
-						i++
-						a.LogFile = args[i]
-					}
-				case "--verbose":
-					a.Verbose = true
-				case "--version":
-					a.Version = true
-				case "--help":
-					a.ShowHelp = true
-				case "--proxy-api-key":
-					if value != "" {
-						a.ProxyAPIKey = value
-					} else if i+1 < len(args) {
-						i++
-						a.ProxyAPIKey = args[i]
-					}
-				case "--tls-cert":
-					if value != "" {
-						a.TLSCert = value
-					} else if i+1 < len(args) {
-						i++
-						a.TLSCert = args[i]
-					}
-				case "--tls-key":
-					if value != "" {
-						a.TLSKey = value
-					} else if i+1 < len(args) {
-						i++
-						a.TLSKey = args[i]
-					}
-				case "--port":
-					if value != "" {
-						a.Port, _ = strconv.Atoi(value)
-					} else if i+1 < len(args) {
-						i++
-						a.Port, _ = strconv.Atoi(args[i])
-					}
-				case "--no-update-check":
-					a.NoUpdateCheck = true
-				default:
-					// name is in knownFlags (derived from the rootCommand
-					// tree) but no case above handles it. This can only
-					// happen if commands.go declares a flag parseArgs was
-					// never taught to parse — fail loudly instead of
-					// silently swallowing it. Guards the "every tree flag
-					// is parsed" half of #170's parity contract.
-					return nil, fmt.Errorf("internal: %s is a known flag but parseArgs has no case for it (drift between commands.go and parseArgs)", name)
-				}
-				i++
-				continue
-			}
-		}
-
-		// Not a known databricks-claude flag — pass through to claude.
-		a.ClaudeArgs = append(a.ClaudeArgs, arg)
-		i++
+	if err := cli.ParseFlags(args, newParseSpec(a)); err != nil {
+		return nil, err
 	}
 	return a, nil
 }
