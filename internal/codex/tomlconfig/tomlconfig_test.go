@@ -32,6 +32,21 @@ func readConfig(t *testing.T, path string) string {
 	return string(data)
 }
 
+// assertNoLegacyProfile fails if the config carries either half of the legacy
+// profile-selector shape: the root `profile = "databricks-proxy"` line or the
+// `[profiles.databricks-proxy]` section. The assertions are scoped precisely so
+// they never false-fail a user's own `[profiles.myprofile]` section or the
+// `model_provider = "databricks-proxy"` key.
+func assertNoLegacyProfile(t *testing.T, content string) {
+	t.Helper()
+	if strings.Contains(content, `profile = "databricks-proxy"`) {
+		t.Errorf("expected no root profile = \"databricks-proxy\" selector, got:\n%s", content)
+	}
+	if strings.Contains(content, "[profiles.databricks-proxy]") {
+		t.Errorf("expected no [profiles.databricks-proxy] section, got:\n%s", content)
+	}
+}
+
 func TestPatch_EmptyConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -49,29 +64,27 @@ func TestPatch_EmptyConfig(t *testing.T) {
 	}
 
 	content := readConfig(t, configPath)
-	if !strings.Contains(content, `profile = "databricks-proxy"`) {
-		t.Error("expected profile root key")
-	}
-	if !strings.Contains(content, "[profiles.databricks-proxy]") {
-		t.Error("expected profiles section")
+	if !strings.Contains(content, `model_provider = "databricks-proxy"`) {
+		t.Error("expected model_provider root key")
 	}
 	if !strings.Contains(content, `model = "databricks-gpt-5-5"`) {
-		t.Error("expected model in profile section")
+		t.Error("expected root model key")
+	}
+	if !strings.Contains(content, "[model_providers.databricks-proxy]") {
+		t.Error("expected model_providers section")
 	}
 	if !strings.Contains(content, `base_url = "http://127.0.0.1:9999"`) {
 		t.Error("expected base_url in provider section")
 	}
+	assertNoLegacyProfile(t, content)
 }
 
 func TestPatch_PreservesUserSections(t *testing.T) {
-	initial := `profile = "myprofile"
-
-[projects.myapp]
+	initial := `[projects.myapp]
 sandbox_permissions = "full-auto"
 
-[profiles.myprofile]
-model_provider = "openai"
-model = "gpt-4"
+[notice]
+shown = true
 `
 	m, configPath := setup(t, initial)
 
@@ -84,25 +97,24 @@ model = "gpt-4"
 	}
 
 	content := readConfig(t, configPath)
-	// User section must survive.
 	if !strings.Contains(content, "[projects.myapp]") {
 		t.Error("expected [projects.myapp] to be preserved")
 	}
 	if !strings.Contains(content, `sandbox_permissions = "full-auto"`) {
 		t.Error("expected sandbox_permissions to be preserved")
 	}
-	// User's other profile must survive.
-	if !strings.Contains(content, "[profiles.myprofile]") {
-		t.Error("expected [profiles.myprofile] to be preserved")
+	if !strings.Contains(content, "[notice]") {
+		t.Error("expected [notice] to be preserved")
 	}
+	assertNoLegacyProfile(t, content)
 }
 
 func TestPatch_PreservesUserModel(t *testing.T) {
-	initial := `profile = "databricks-proxy"
-
-[profiles.databricks-proxy]
+	// Runtime shape: an already-migrated config has the proxy as the top-level
+	// default provider with a root model. Patching again (ModelExplicit=false)
+	// must preserve the user's existing root model.
+	initial := `model = "custom-user-model"
 model_provider = "databricks-proxy"
-model = "custom-user-model"
 
 [model_providers.databricks-proxy]
 name = "Databricks Proxy"
@@ -112,7 +124,6 @@ wire_api = "responses"
 `
 	m, configPath := setup(t, initial)
 
-	// ModelExplicit=false: should preserve user's model.
 	err := m.Patch(PatchConfig{
 		ProxyURL:      "http://127.0.0.1:9999",
 		Model:         "databricks-gpt-5-5",
@@ -126,14 +137,12 @@ wire_api = "responses"
 	if !strings.Contains(content, `model = "custom-user-model"`) {
 		t.Errorf("expected user model to be preserved, got:\n%s", content)
 	}
+	assertNoLegacyProfile(t, content)
 }
 
 func TestPatch_OverridesModelWhenExplicit(t *testing.T) {
-	initial := `profile = "databricks-proxy"
-
-[profiles.databricks-proxy]
+	initial := `model = "custom-user-model"
 model_provider = "databricks-proxy"
-model = "custom-user-model"
 
 [model_providers.databricks-proxy]
 name = "Databricks Proxy"
@@ -161,6 +170,200 @@ wire_api = "responses"
 	}
 }
 
+// TestPatch_NeverEmitsLegacyProfile guards the acceptance criterion that the
+// patcher NEVER writes the fatal legacy shape — neither on a fresh install nor
+// when the user has an unrelated [profiles.myprofile] section.
+func TestPatch_NeverEmitsLegacyProfile(t *testing.T) {
+	cases := map[string]string{
+		"fresh": "",
+		"user-profile": `profile = "myprofile"
+
+[profiles.myprofile]
+model_provider = "openai"
+model = "gpt-4"
+`,
+	}
+	for name, initial := range cases {
+		t.Run(name, func(t *testing.T) {
+			m, configPath := setup(t, initial)
+			if err := m.Patch(PatchConfig{
+				ProxyURL: "http://127.0.0.1:9999",
+				Model:    "databricks-gpt-5-5",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			content := readConfig(t, configPath)
+			assertNoLegacyProfile(t, content)
+			if !strings.Contains(content, `model_provider = "databricks-proxy"`) {
+				t.Errorf("expected root model_provider default, got:\n%s", content)
+			}
+		})
+	}
+}
+
+// TestPatch_MigratesLegacyProfileShape seeds the OLD profile-selector shape a
+// returning user carries (patch-and-leave persists it) and asserts Patch
+// migrates it to the top-level default-provider shape: the root profile
+// selector and [profiles.databricks-proxy] section are gone, root model +
+// model_provider are present, the provider base_url is healed, and re-patching
+// is byte-idempotent.
+func TestPatch_MigratesLegacyProfileShape(t *testing.T) {
+	initial := `profile = "databricks-proxy"
+
+[profiles.databricks-proxy]
+model_provider = "databricks-proxy"
+model = "databricks-gpt-5-5"
+
+[model_providers.databricks-proxy]
+name = "Databricks Proxy"
+base_url = "http://127.0.0.1:59998"
+api_key = "databricks-proxy"
+wire_api = "responses"
+`
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Runtime path: fresh Manager per patch, NO Backup() (m.original stays nil).
+	patchOnce := func() string {
+		m := NewManager(configPath)
+		if err := m.Patch(PatchConfig{
+			ProxyURL: "http://127.0.0.1:49154",
+			Model:    "databricks-gpt-5-5",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return readConfig(t, configPath)
+	}
+
+	first := patchOnce()
+	assertNoLegacyProfile(t, first)
+	if !strings.Contains(first, `model_provider = "databricks-proxy"`) {
+		t.Errorf("expected root model_provider default after migration, got:\n%s", first)
+	}
+	if !strings.Contains(first, `model = "databricks-gpt-5-5"`) {
+		t.Errorf("expected root model after migration, got:\n%s", first)
+	}
+	if !strings.Contains(first, `base_url = "http://127.0.0.1:49154"`) {
+		t.Errorf("expected provider base_url healed to live proxy, got:\n%s", first)
+	}
+	if strings.Contains(first, "59998") {
+		t.Errorf("expected stale base_url 59998 removed, got:\n%s", first)
+	}
+
+	second := patchOnce()
+	if first != second {
+		t.Errorf("re-patch after migration is not idempotent:\n--- first ---\n%q\n--- second ---\n%q", first, second)
+	}
+}
+
+// TestPatch_MigrationNonDestructiveToForeignProfile asserts the migration only
+// removes the proxy's OWN legacy shape: a user's foreign root profile selector
+// and their [profiles.myprofile] section survive Patch untouched.
+func TestPatch_MigrationNonDestructiveToForeignProfile(t *testing.T) {
+	initial := `profile = "myprofile"
+
+[profiles.myprofile]
+model_provider = "openai"
+model = "gpt-4"
+`
+	m, configPath := setup(t, initial)
+
+	if err := m.Patch(PatchConfig{
+		ProxyURL: "http://127.0.0.1:9999",
+		Model:    "databricks-gpt-5-5",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	content := readConfig(t, configPath)
+	if !strings.Contains(content, `profile = "myprofile"`) {
+		t.Errorf("expected foreign root profile to survive, got:\n%s", content)
+	}
+	if !strings.Contains(content, "[profiles.myprofile]") {
+		t.Errorf("expected [profiles.myprofile] to survive, got:\n%s", content)
+	}
+	if !strings.Contains(content, `model = "gpt-4"`) {
+		t.Errorf("expected user's profile model to survive, got:\n%s", content)
+	}
+	assertNoLegacyProfile(t, content)
+}
+
+// TestPatch_ModelPrecedenceRuntime exercises the model-resolution precedence on
+// the REAL runtime path — a fresh Manager with NO Backup() call, so m.original
+// is nil and resolution must read the on-disk content string. Covers all three
+// branches: explicit --model wins, else existing root model preserved, else the
+// resolved default.
+func TestPatch_ModelPrecedenceRuntime(t *testing.T) {
+	provider := `
+[model_providers.databricks-proxy]
+name = "Databricks Proxy"
+base_url = "http://127.0.0.1:9999"
+api_key = "databricks-proxy"
+wire_api = "responses"
+`
+	tests := []struct {
+		name          string
+		seedRootModel string // "" = no root model on disk
+		cfgModel      string
+		modelExplicit bool
+		wantModel     string
+	}{
+		{
+			name:          "explicit flag wins over existing root model",
+			seedRootModel: "existing-model",
+			cfgModel:      "flag-model",
+			modelExplicit: true,
+			wantModel:     "flag-model",
+		},
+		{
+			name:          "existing root model preserved when not explicit",
+			seedRootModel: "existing-model",
+			cfgModel:      "default-model",
+			modelExplicit: false,
+			wantModel:     "existing-model",
+		},
+		{
+			name:          "resolved default used when no root model on disk",
+			seedRootModel: "",
+			cfgModel:      "default-model",
+			modelExplicit: false,
+			wantModel:     "default-model",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.toml")
+			seed := provider
+			if tc.seedRootModel != "" {
+				seed = "model = \"" + tc.seedRootModel + "\"\n" + provider
+			}
+			if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			// Runtime path: no Backup(), so m.original is nil.
+			m := NewManager(configPath)
+			if err := m.Patch(PatchConfig{
+				ProxyURL:      "http://127.0.0.1:9999",
+				Model:         tc.cfgModel,
+				ModelExplicit: tc.modelExplicit,
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			content := readConfig(t, configPath)
+			want := `model = "` + tc.wantModel + `"`
+			if !strings.Contains(content, want) {
+				t.Errorf("expected %s, got:\n%s", want, content)
+			}
+		})
+	}
+}
+
 func TestRestore_RemovesAddedKeys(t *testing.T) {
 	// Start with a config that has NO databricks-proxy sections.
 	initial := `[projects.myapp]
@@ -176,10 +379,10 @@ sandbox_permissions = "full-auto"
 		t.Fatal(err)
 	}
 
-	// Verify patch added sections.
+	// Verify patch added managed content.
 	content := readConfig(t, configPath)
-	if !strings.Contains(content, "[profiles.databricks-proxy]") {
-		t.Fatal("patch should have added profiles section")
+	if !strings.Contains(content, "[model_providers.databricks-proxy]") {
+		t.Fatal("patch should have added model_providers section")
 	}
 
 	// Restore.
@@ -188,14 +391,11 @@ sandbox_permissions = "full-auto"
 	}
 
 	content = readConfig(t, configPath)
-	if strings.Contains(content, "[profiles.databricks-proxy]") {
-		t.Error("expected [profiles.databricks-proxy] to be removed after restore")
-	}
 	if strings.Contains(content, "[model_providers.databricks-proxy]") {
 		t.Error("expected [model_providers.databricks-proxy] to be removed after restore")
 	}
-	if strings.Contains(content, `profile = "databricks-proxy"`) {
-		t.Error("expected profile root key to be removed after restore")
+	if strings.Contains(content, `model_provider = "databricks-proxy"`) {
+		t.Error("expected model_provider root key to be removed after restore")
 	}
 	// User section must survive.
 	if !strings.Contains(content, "[projects.myapp]") {
@@ -204,17 +404,11 @@ sandbox_permissions = "full-auto"
 }
 
 func TestRestore_RestoresOriginalValues(t *testing.T) {
-	initial := `profile = "myprofile"
-
-[profiles.databricks-proxy]
-model_provider = "databricks-proxy"
-model = "original-model"
-
-[model_providers.databricks-proxy]
-name = "Databricks Proxy"
-base_url = "http://old-proxy:1234"
-api_key = "databricks-proxy"
-wire_api = "responses"
+	// Original config already uses the top-level default-provider shape with a
+	// non-proxy provider — Restore must put the user's root model and
+	// model_provider back.
+	initial := `model = "original-model"
+model_provider = "openai"
 
 [projects.myapp]
 sandbox_permissions = "full-auto"
@@ -236,11 +430,11 @@ sandbox_permissions = "full-auto"
 	}
 
 	content := readConfig(t, configPath)
-	if !strings.Contains(content, `profile = "myprofile"`) {
-		t.Errorf("expected original profile to be restored, got:\n%s", content)
-	}
 	if !strings.Contains(content, `model = "original-model"`) {
 		t.Errorf("expected original model to be restored, got:\n%s", content)
+	}
+	if !strings.Contains(content, `model_provider = "openai"`) {
+		t.Errorf("expected original model_provider to be restored, got:\n%s", content)
 	}
 	if !strings.Contains(content, "[projects.myapp]") {
 		t.Errorf("expected user section preserved, got:\n%s", content)
@@ -321,8 +515,7 @@ trust_level = trusted
 `
 	m, configPath := setup(t, initial)
 
-	// No --model flag (ModelExplicit=false), no model in [profiles.databricks-proxy].
-	// Should pick up the root-level model.
+	// No --model flag (ModelExplicit=false): should preserve the root-level model.
 	err := m.Patch(PatchConfig{
 		ProxyURL:      "http://127.0.0.1:9999",
 		Model:         "databricks-gpt-5-5",
@@ -334,7 +527,7 @@ trust_level = trusted
 
 	content := readConfig(t, configPath)
 	if !strings.Contains(content, `model = "databricks-gpt-5-3"`) {
-		t.Errorf("expected root-level model to be carried into profile section, got:\n%s", content)
+		t.Errorf("expected root-level model to be preserved, got:\n%s", content)
 	}
 	if strings.Contains(content, `model = "databricks-gpt-5-5"`) {
 		t.Errorf("expected fallback model NOT to be used when root-level model exists, got:\n%s", content)
@@ -523,9 +716,9 @@ func TestPatch_RemovesOTELSectionWhenEndpointsEmpty(t *testing.T) {
 	if strings.Contains(after, "metrics_exporter") {
 		t.Errorf("expected no stale metrics_exporter line after removal, got:\n%s", after)
 	}
-	// And [profiles.databricks-proxy] should still be intact.
-	if !strings.Contains(after, "[profiles.databricks-proxy]") {
-		t.Errorf("expected [profiles.databricks-proxy] to survive [otel] removal, got:\n%s", after)
+	// And the managed provider section should still be intact.
+	if !strings.Contains(after, "[model_providers.databricks-proxy]") {
+		t.Errorf("expected [model_providers.databricks-proxy] to survive [otel] removal, got:\n%s", after)
 	}
 }
 
@@ -555,10 +748,10 @@ func TestRestoreFromBackup(t *testing.T) {
 	configPath := filepath.Join(dir, "config.toml")
 	backupPath := configPath + ".databricks-codex-backup"
 
-	original := `profile = "myprofile"
+	original := `model = "mymodel"
 `
 	os.WriteFile(backupPath, []byte(original), 0o600)
-	os.WriteFile(configPath, []byte(`profile = "databricks-proxy"`), 0o600)
+	os.WriteFile(configPath, []byte(`model_provider = "databricks-proxy"`), 0o600)
 
 	m := NewManager(configPath)
 	restored := m.RestoreFromBackup()
@@ -567,7 +760,7 @@ func TestRestoreFromBackup(t *testing.T) {
 	}
 
 	content := readConfig(t, configPath)
-	if !strings.Contains(content, `profile = "myprofile"`) {
+	if !strings.Contains(content, `model = "mymodel"`) {
 		t.Errorf("expected original content restored from backup, got:\n%s", content)
 	}
 

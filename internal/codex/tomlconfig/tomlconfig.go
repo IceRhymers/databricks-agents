@@ -32,10 +32,8 @@ type Manager struct {
 	// Surgical restore state: tracks what we changed so Restore only undoes
 	// what we touched. Keys map to original line/block content, or sentinel
 	// if the key/section was absent before patching.
-	origRootKeys    map[string]string // root key name -> original line or sentinel
-	origSections    map[string]string // section header (e.g. "profiles.databricks-proxy") -> original block or sentinel
-	origModelLine   string            // original "model = ..." line in [profiles.databricks-proxy], or sentinel
-	patchedModelVal string            // model value we wrote (for preserve-if-present check)
+	origRootKeys map[string]string // root key name -> original line or sentinel
+	origSections map[string]string // section header (e.g. "model_providers.databricks-proxy") -> original block or sentinel
 }
 
 // NewManager creates a new config.toml manager.
@@ -83,11 +81,10 @@ func (m *Manager) Backup() error {
 }
 
 // managedRootKeys lists top-level keys we manage.
-var managedRootKeys = []string{"profile"}
+var managedRootKeys = []string{"model", "model_provider"}
 
 // managedSections lists section headers we manage.
 var managedSections = []string{
-	"profiles.databricks-proxy",
 	"model_providers.databricks-proxy",
 	"otel",
 }
@@ -103,12 +100,47 @@ func (m *Manager) Patch(cfg PatchConfig) error {
 		content = string(data)
 	}
 
-	// --- Save originals and patch root keys ---
-	content = m.patchRootKey(content, "profile", `"databricks-proxy"`)
+	// --- Migration (one-directional): strip the legacy profile-selector shape ---
+	// Older databricks-codex wrote the proxy as a named profile — a root
+	// `profile = "databricks-proxy"` selector plus a `[profiles.databricks-proxy]`
+	// section. Codex >=0.134 makes the root `profile` selector a HARD startup
+	// error, and because databricks-codex is patch-and-leave the fatal shape
+	// stays persisted in returning users' configs. Remove both permanently
+	// (see #230). removeLegacyRootProfile deliberately does not record into
+	// origRootKeys, so a Restore could never resurrect the fatal root key.
+	// removeSection does record the stripped block into origSections, but that
+	// is inert on the runtime path: Restore is never called (patch-and-leave),
+	// and even if it were, restoreSection is header-anchored and no-ops once the
+	// header is gone — so the removal is effectively permanent in production.
+	content = m.removeSection(content, "profiles.databricks-proxy")
+	content = m.removeLegacyRootProfile(content)
 
-	// --- Parse sections for surgical section patching ---
-	content = m.patchSection(content, "profiles.databricks-proxy",
-		m.buildProfileSection(cfg))
+	// --- Model resolution ---
+	// databricks-codex is patch-and-leave: Backup() is never called on the
+	// runtime path, so m.original is nil in production. Read the on-disk
+	// `content` string, NOT m.original.
+	//
+	// Precedence: an explicit --model always wins; otherwise preserve the
+	// user's existing root model; otherwise fall back to the resolved model
+	// (saved state or built-in default).
+	existingRoot := m.findRootModel(content)
+	var modelVal string
+	switch {
+	case cfg.ModelExplicit:
+		modelVal = cfg.Model
+	case existingRoot != "":
+		modelVal = existingRoot
+	default:
+		modelVal = cfg.Model
+	}
+	if modelVal != "" {
+		content = m.patchRootKey(content, "model", fmt.Sprintf("%q", modelVal))
+	}
+
+	// Make the proxy the top-level default provider. The hooks/daemon path runs
+	// bare `codex` with no way to inject --profile, so the proxy MUST be the
+	// default provider rather than a named profile selector.
+	content = m.patchRootKey(content, "model_provider", `"databricks-proxy"`)
 
 	content = m.patchSection(content, "model_providers.databricks-proxy",
 		m.buildProviderSection(cfg))
@@ -131,44 +163,41 @@ func (m *Manager) Patch(cfg PatchConfig) error {
 	return nil
 }
 
-// buildProfileSection builds the [profiles.databricks-proxy] section body.
-// It implements preserve-if-present for the model key.
-func (m *Manager) buildProfileSection(cfg PatchConfig) string {
-	var b strings.Builder
-	b.WriteString("model_provider = \"databricks-proxy\"\n")
-
-	// Preserve-if-present: check if user already has a model line in this section.
-	existingModel := m.findModelInSection(string(m.original), "profiles.databricks-proxy")
-	if existingModel != "" {
-		m.origModelLine = existingModel
-	} else {
-		m.origModelLine = sentinel
-	}
-
-	if cfg.ModelExplicit {
-		// User explicitly passed --model: always write it.
-		b.WriteString(fmt.Sprintf("model = %q\n", cfg.Model))
-		m.patchedModelVal = cfg.Model
-	} else if existingModel != "" {
-		// Preserve user's existing model line in the profile section as-is.
-		b.WriteString(existingModel + "\n")
-	} else {
-		// No explicit flag, no model in the profile section.
-		// Check root-level model — since we switch the active profile to
-		// databricks-proxy, the root-level model would be ignored by Codex.
-		// Carry it into the profile section so the user's choice is respected.
-		rootModel := m.findRootModel(string(m.original))
-		if rootModel != "" {
-			b.WriteString(fmt.Sprintf("model = %q\n", rootModel))
-			m.patchedModelVal = rootModel
-		} else if cfg.Model != "" {
-			// Fall back to the resolved model (saved state or built-in default).
-			b.WriteString(fmt.Sprintf("model = %q\n", cfg.Model))
-			m.patchedModelVal = cfg.Model
+// removeLegacyRootProfile deletes a root-level `profile = "databricks-proxy"`
+// selector line — the fatal legacy shape Codex >=0.134 rejects. The match is
+// value-scoped (exact `"databricks-proxy"`) so a user's own root profile is
+// never touched. This migration is one-directional: unlike patchRootKey it does
+// NOT record the removal in origRootKeys, so Restore never resurrects it.
+//
+// A foreign root `profile = "<other>"` is left in place (stripping a user's own
+// profile selector would be destructive and is out of scope); those users stay
+// 0.134-blocked by design, so we emit a non-fatal warning to make that visible.
+func (m *Manager) removeLegacyRootProfile(content string) string {
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !isRootKey(trimmed, "profile") || inAnySection(lines, i) {
+			continue
 		}
+		parts := strings.SplitN(trimmed, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		val := strings.Trim(strings.TrimSpace(parts[1]), `"`)
+		if val != "databricks-proxy" {
+			log.Printf("databricks-codex: leaving user-authored root profile = %q in config.toml; "+
+				"Codex >=0.134 rejects a root profile selector, so remove it if codex fails to start", val)
+			return content
+		}
+		// Delete the line, and a trailing blank line if present (matching the
+		// section-gap cleanup in removeSection).
+		if i+1 < len(lines) && strings.TrimSpace(lines[i+1]) == "" {
+			lines = removeAt(lines, i+1)
+		}
+		lines = removeAt(lines, i)
+		return strings.Join(lines, "\n")
 	}
-
-	return b.String()
+	return content
 }
 
 // buildProviderSection builds the [model_providers.databricks-proxy] section body.
@@ -375,36 +404,6 @@ func (m *Manager) findRootModel(content string) string {
 	return ""
 }
 
-// findModelInSection looks for a "model = ..." line inside a named section.
-func (m *Manager) findModelInSection(content, sectionName string) string {
-	if content == "" {
-		return ""
-	}
-	header := "[" + sectionName + "]"
-	lines := strings.Split(content, "\n")
-	inSection := false
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == header {
-			inSection = true
-			continue
-		}
-		if inSection {
-			if strings.HasPrefix(trimmed, "[") {
-				break
-			}
-			if strings.HasPrefix(trimmed, "model") && strings.Contains(trimmed, "=") {
-				// Distinguish "model" from "model_provider"
-				afterKey := strings.TrimPrefix(trimmed, "model")
-				if len(afterKey) > 0 && (afterKey[0] == ' ' || afterKey[0] == '=') {
-					return line
-				}
-			}
-		}
-	}
-	return ""
-}
-
 // Restore performs surgical restoration: only removes/restores keys and sections
 // that we patched. Non-managed content is untouched.
 func (m *Manager) Restore() error {
@@ -433,13 +432,6 @@ func (m *Manager) Restore() error {
 	// Restore sections.
 	for sectionName, orig := range m.origSections {
 		content = m.restoreSection(content, sectionName, orig)
-	}
-
-	// Restore model line if it was absent before.
-	if m.origModelLine == sentinel {
-		content = m.removeModelFromSection(content, "profiles.databricks-proxy")
-	} else if m.origModelLine != "" && m.origModelLine != sentinel {
-		content = m.restoreModelInSection(content, "profiles.databricks-proxy", m.origModelLine)
 	}
 
 	// Clean up trailing whitespace.
@@ -516,60 +508,6 @@ func (m *Manager) restoreSection(content, sectionName, orig string) string {
 	newLines = append(newLines, origLines...)
 	newLines = append(newLines, lines[endIdx:]...)
 	return strings.Join(newLines, "\n")
-}
-
-// removeModelFromSection removes the model line from a section.
-func (m *Manager) removeModelFromSection(content, sectionName string) string {
-	header := "[" + sectionName + "]"
-	lines := strings.Split(content, "\n")
-	inSection := false
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == header {
-			inSection = true
-			continue
-		}
-		if inSection {
-			if strings.HasPrefix(trimmed, "[") {
-				break
-			}
-			if strings.HasPrefix(trimmed, "model") && strings.Contains(trimmed, "=") {
-				afterKey := strings.TrimPrefix(trimmed, "model")
-				if len(afterKey) > 0 && (afterKey[0] == ' ' || afterKey[0] == '=') {
-					lines = removeAt(lines, i)
-					return strings.Join(lines, "\n")
-				}
-			}
-		}
-	}
-	return content
-}
-
-// restoreModelInSection restores the model line in a section to its original value.
-func (m *Manager) restoreModelInSection(content, sectionName, origLine string) string {
-	header := "[" + sectionName + "]"
-	lines := strings.Split(content, "\n")
-	inSection := false
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == header {
-			inSection = true
-			continue
-		}
-		if inSection {
-			if strings.HasPrefix(trimmed, "[") {
-				break
-			}
-			if strings.HasPrefix(trimmed, "model") && strings.Contains(trimmed, "=") {
-				afterKey := strings.TrimPrefix(trimmed, "model")
-				if len(afterKey) > 0 && (afterKey[0] == ' ' || afterKey[0] == '=') {
-					lines[i] = origLine
-					return strings.Join(lines, "\n")
-				}
-			}
-		}
-	}
-	return content
 }
 
 // RestoreFromBackup recovers from a crash by restoring from the backup file.

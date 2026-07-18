@@ -10,20 +10,18 @@ import (
 	"github.com/IceRhymers/databricks-agents/internal/profile"
 )
 
-// Golden config.toml outputs, captured from the ported tomlconfig.Patch (which
-// is byte-identical to the standalone databricks-codex repo — the package was
-// copied verbatim). These pins guard against any future edit to tomlconfig or
-// codexSettingsPatcher that would change the observable config.toml wire shape:
-// base_url, wire_api="responses", the model_providers.databricks-proxy block,
-// and the [otel] section when endpoints are set.
+// Golden config.toml outputs for the top-level default-provider shape (#230):
+// the proxy is registered as the root model_provider (NOT a named profile
+// selector), so bare `codex` via hooks/daemon routes through it and Codex
+// >=0.134 does not reject a root `profile` selector. These pins guard the
+// observable config.toml wire shape: root model + model_provider, the
+// model_providers.databricks-proxy block, and the [otel] section when set.
 const (
 	goldenProxyURL = "http://127.0.0.1:49154"
 
 	// Fresh install, OTEL off, explicit model.
-	goldenFreshNoOTEL = "\nprofile = \"databricks-proxy\"\n\n" +
-		"[profiles.databricks-proxy]\n" +
-		"model_provider = \"databricks-proxy\"\n" +
-		"model = \"databricks-gpt-5-5\"\n\n" +
+	goldenFreshNoOTEL = "\nmodel = \"databricks-gpt-5-5\"\n" +
+		"model_provider = \"databricks-proxy\"\n\n" +
 		"[model_providers.databricks-proxy]\n" +
 		"name = \"Databricks Proxy\"\n" +
 		"base_url = \"http://127.0.0.1:49154\"\n" +
@@ -31,10 +29,8 @@ const (
 		"wire_api = \"responses\"\n"
 
 	// Fresh install, OTEL on (both metrics + logs endpoints).
-	goldenFreshOTEL = "\nprofile = \"databricks-proxy\"\n\n" +
-		"[profiles.databricks-proxy]\n" +
-		"model_provider = \"databricks-proxy\"\n" +
-		"model = \"databricks-gpt-5-5\"\n\n" +
+	goldenFreshOTEL = "\nmodel = \"databricks-gpt-5-5\"\n" +
+		"model_provider = \"databricks-proxy\"\n\n" +
 		"[model_providers.databricks-proxy]\n" +
 		"name = \"Databricks Proxy\"\n" +
 		"base_url = \"http://127.0.0.1:49154\"\n" +
@@ -99,10 +95,8 @@ func TestCodexPatch_GoldenFreshOTEL(t *testing.T) {
 func TestCodexPatch_StaleBaseURLSelfHeal(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.toml")
-	stale := "profile = \"databricks-proxy\"\n\n" +
-		"[profiles.databricks-proxy]\n" +
-		"model_provider = \"databricks-proxy\"\n" +
-		"model = \"databricks-gpt-5-5\"\n\n" +
+	stale := "model = \"databricks-gpt-5-5\"\n" +
+		"model_provider = \"databricks-proxy\"\n\n" +
 		"[model_providers.databricks-proxy]\n" +
 		"name = \"Databricks Proxy\"\n" +
 		"base_url = \"http://127.0.0.1:59998\"\n" +
