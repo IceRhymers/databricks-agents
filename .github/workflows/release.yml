@@ -120,9 +120,12 @@ jobs:
             dist/databricks-claude.pkg \
             dist/databricks-claude-trust.mobileconfig
 
-  # One lockstep release builds all four binaries (see BINS in the Makefile),
-  # so every package-manager dispatch fans out per tool. fail-fast is off: a
-  # tool whose formula/manifest lags shouldn't strand the others.
+  # `make dist` builds all four binaries, but only the distributed ones are
+  # dispatched. databricks-codex and databricks-opencode are intentionally
+  # absent: their standalone repos are archived and we are not publishing new
+  # artifacts for them, so their tap formulae stay frozen at their last
+  # standalone versions. Dispatching for them would fail the tap's
+  # update-formula.yml on every release forever.
   update-homebrew:
     needs: [release-please, build-and-upload]
     if: needs.release-please.outputs.release_created == 'true'
@@ -133,8 +136,6 @@ jobs:
         tool:
           - databricks-agents
           - databricks-claude
-          - databricks-codex
-          - databricks-opencode
     steps:
       - name: Dispatch formula update to homebrew-tap
         env:
@@ -152,13 +153,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # databricks-agents is absent on purpose: scoop-bucket has no manifest
-        # for the multiplexer and update-manifests.yml doesn't listen for
-        # update-databricks-agents yet. Add it here once the bucket does.
+        # Same freeze as above for codex/opencode. databricks-agents is absent
+        # for a different reason: scoop-bucket has no manifest for the
+        # multiplexer and update-manifests.yml doesn't listen for
+        # update-databricks-agents. Add it here once the bucket does.
         binary:
           - databricks-claude
-          - databricks-codex
-          - databricks-opencode
     steps:
       - name: Dispatch manifest update to scoop-bucket
         env:
