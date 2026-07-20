@@ -1,5 +1,31 @@
 # Changelog
 
+## [2.0.0](https://github.com/IceRhymers/databricks-agents/compare/v1.2.0...v2.0.0) (2026-07-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* the Go module path is now github.com/IceRhymers/databricks-agents; importers must update. The databricks-codex and databricks-opencode standalone repos are archived and no longer receive releases — both binaries now ship from this repo under a single lockstep version, so opencode jumps 1.2.0 -> 2.0.0. codex additionally registers its proxy as a top-level default provider rather than a named profile ([#230](https://github.com/IceRhymers/databricks-agents/issues/230)), which changes the generated config shape.
+
+### Features
+
+* **codex:** fold databricks-codex into the monorepo ([#201](https://github.com/IceRhymers/databricks-agents/issues/201)) ([#210](https://github.com/IceRhymers/databricks-agents/issues/210)) ([fbc6e9d](https://github.com/IceRhymers/databricks-agents/commit/fbc6e9d21fe5c337e38faf187e536d3fdea27475))
+* **databricks:** cmd/databricks multiplexer over the profile registry ([#203](https://github.com/IceRhymers/databricks-agents/issues/203)) ([#213](https://github.com/IceRhymers/databricks-agents/issues/213)) ([e1c2d77](https://github.com/IceRhymers/databricks-agents/commit/e1c2d77b7fa6613a00e43786c24b9f8e2d3944fa))
+* **modeldiscovery:** auto-discover Claude models via Unity AI Gateway ([0733004](https://github.com/IceRhymers/databricks-agents/commit/07330041e43aaa6767691f8dd235d1cdf8215d24))
+* **modeldiscovery:** auto-discover Claude models via Unity AI Gateway ([68005a5](https://github.com/IceRhymers/databricks-agents/commit/68005a5286318a029da124e3a3d251b7f0df5afd))
+* **opencode:** fold databricks-opencode into the monorepo ([#202](https://github.com/IceRhymers/databricks-agents/issues/202)) ([#212](https://github.com/IceRhymers/databricks-agents/issues/212)) ([922c28a](https://github.com/IceRhymers/databricks-agents/commit/922c28ad18847576da22910e7919b5278aadd8c5))
+* **profile:** introduce internal/profile Profile abstraction (claude) ([#199](https://github.com/IceRhymers/databricks-agents/issues/199)) ([#208](https://github.com/IceRhymers/databricks-agents/issues/208)) ([0e2bc63](https://github.com/IceRhymers/databricks-agents/commit/0e2bc632d0bf1485e4d367cf385ffd3166dcd1f6))
+* release the monorepo consolidation as 2.0.0 ([e8cbeea](https://github.com/IceRhymers/databricks-agents/commit/e8cbeeab9e2ded718058c7e3cbcf2a40eb79b36b))
+
+
+### Bug Fixes
+
+* **codex:** register proxy as top-level default provider, not a profile ([#230](https://github.com/IceRhymers/databricks-agents/issues/230)) ([ae1d1a1](https://github.com/IceRhymers/databricks-agents/commit/ae1d1a1572bf662fbd3d8c1367d367c092ea25fd))
+* **codex:** register proxy as top-level default provider, not a profile ([#230](https://github.com/IceRhymers/databricks-agents/issues/230)) ([b3f63c9](https://github.com/IceRhymers/databricks-agents/commit/b3f63c98b61e3af980a9c5c9c45eec26dcf11cb6))
+* **modeldiscovery:** address code-review findings ([4ed5ac9](https://github.com/IceRhymers/databricks-agents/commit/4ed5ac9add628b73e262b02a40301c684aa1e0c9))
+* **modeldiscovery:** parse the real model-services wire shape ([68ceea0](https://github.com/IceRhymers/databricks-agents/commit/68ceea06e0610f16d09c064004b855e1f303af2d))
+* **modeldiscovery:** send X-Databricks-Org-Id so model-services LIST resolves a metastore ([46b517f](https://github.com/IceRhymers/databricks-agents/commit/46b517fddfc956edb17929e1fea5601061a42571))
+
 ## [1.2.0](https://github.com/IceRhymers/databricks-claude/compare/v1.1.0...v1.2.0) (2026-06-03)
 
 
