@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.0.1](https://github.com/IceRhymers/databricks-agents/compare/v2.0.0...v2.0.1) (2026-07-20)
+
+
+### Bug Fixes
+
+* **proxy:** remove the Responses-API SSE item_id rewriter ([d83673e](https://github.com/IceRhymers/databricks-agents/commit/d83673ebbe1574e61cfb44b5e303e93fcd741d03))
+* **proxy:** remove the Responses-API SSE item_id rewriter ([aa40155](https://github.com/IceRhymers/databricks-agents/commit/aa40155b53a0832cd4db085a3d08d296c6240ef2)), closes [#238](https://github.com/IceRhymers/databricks-agents/issues/238)
+* **release:** dispatch package-manager updates for all binaries ([40adc5a](https://github.com/IceRhymers/databricks-agents/commit/40adc5a25e1322659023238a10be6c9d63743341)), closes [#233](https://github.com/IceRhymers/databricks-agents/issues/233)
+* **release:** dispatch package-manager updates for the distributed binaries ([0aa55f0](https://github.com/IceRhymers/databricks-agents/commit/0aa55f07360237b4aad9dc54e5ce0c63ad447df1))
+* **release:** limit dispatch to actively distributed binaries ([318e68e](https://github.com/IceRhymers/databricks-agents/commit/318e68e98f27cf56359475302a63da4a614be2ab))
+
 ## [2.0.0](https://github.com/IceRhymers/databricks-agents/compare/v1.2.0...v2.0.0) (2026-07-20)
 
 
