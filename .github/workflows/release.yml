@@ -120,10 +120,21 @@ jobs:
             dist/databricks-claude.pkg \
             dist/databricks-claude-trust.mobileconfig
 
+  # One lockstep release builds all four binaries (see BINS in the Makefile),
+  # so every package-manager dispatch fans out per tool. fail-fast is off: a
+  # tool whose formula/manifest lags shouldn't strand the others.
   update-homebrew:
     needs: [release-please, build-and-upload]
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tool:
+          - databricks-agents
+          - databricks-claude
+          - databricks-codex
+          - databricks-opencode
     steps:
       - name: Dispatch formula update to homebrew-tap
         env:
@@ -131,13 +142,23 @@ jobs:
         run: |
           gh api repos/IceRhymers/homebrew-tap/dispatches \
             -f event_type=formula-update \
-            -f "client_payload[tool]=databricks-claude" \
+            -f "client_payload[tool]=${{ matrix.tool }}" \
             -f "client_payload[tag]=${{ needs.release-please.outputs.tag_name }}" \
             -f "client_payload[version]=${{ needs.release-please.outputs.tag_name }}"
   update-scoop:
     needs: [release-please, build-and-upload]
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # databricks-agents is absent on purpose: scoop-bucket has no manifest
+        # for the multiplexer and update-manifests.yml doesn't listen for
+        # update-databricks-agents yet. Add it here once the bucket does.
+        binary:
+          - databricks-claude
+          - databricks-codex
+          - databricks-opencode
     steps:
       - name: Dispatch manifest update to scoop-bucket
         env:
@@ -146,6 +167,6 @@ jobs:
           VERSION="${{ needs.release-please.outputs.tag_name }}"
           VERSION="${VERSION#v}"
           gh api repos/IceRhymers/scoop-bucket/dispatches \
-            -f event_type=update-databricks-claude \
-            -f "client_payload[binary]=databricks-claude" \
+            -f event_type=update-${{ matrix.binary }} \
+            -f "client_payload[binary]=${{ matrix.binary }}" \
             -f "client_payload[version]=${VERSION}"
