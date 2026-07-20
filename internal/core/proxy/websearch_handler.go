@@ -125,32 +125,6 @@ func inferenceHandler(upstream *url.URL, config *Config, ws WebSearchSettings) h
 		// is the FIRST check on the response side — no JSON/SSE inspection,
 		// no buffering. Required by TestProxy_WebSearchDisabled_ByteIdenticalForward.
 		if !rewroteTools.Any() {
-			// RESPONSES-API REWRITE: opencode (and other OpenAI-compatible
-			// clients) run with WebSearch disabled, so they always land here.
-			// When ResponsesRewrite is enabled and this is a Responses-API SSE
-			// stream, reconcile mismatched item_ids (Databricks AI Gateway
-			// re-encodes the stream with divergent ids, breaking @ai-sdk/openai).
-			// Independent of ws.Enabled by design. Claude Code never hits
-			// /responses, so this is byte-identical for it.
-			if config.ResponsesRewrite.Enabled && isResponsesPath(r.URL.Path) && isSSEResponse(resp) {
-				for k, vv := range resp.Header {
-					if isHopByHop(k) {
-						continue
-					}
-					for _, v := range vv {
-						w.Header().Add(k, v)
-					}
-				}
-				// Strip Content-Length: a rewritten frame changes the body
-				// length on the wire.
-				w.Header().Del("Content-Length")
-				w.WriteHeader(resp.StatusCode)
-				if err := pumpResponsesSSE(r.Context(), w, resp.Body, lg); err != nil {
-					lg.Vlogf("responses: SSE pump err: %v", err)
-				}
-				return
-			}
-
 			for k, vv := range resp.Header {
 				if isHopByHop(k) {
 					continue
