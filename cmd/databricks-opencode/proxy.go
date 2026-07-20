@@ -39,14 +39,6 @@ func NewProxyServer(config *ProxyConfig) (http.Handler, error) {
 		TLSKeyFile:        config.TLSKeyFile,
 		ToolName:          "databricks-opencode",
 		Version:           Version,
-		// ResponsesRewrite: the Databricks AI Gateway re-encodes Responses-API
-		// SSE and emits a different id in response.output_item.added (item.id)
-		// than in downstream response.output_text.* / response.content_part.*
-		// events (item_id), which trips @ai-sdk/openai's parser with
-		// "text part <id> not found". opencode is OpenAI-shaped and hits
-		// /v1/responses, so the gate is default-on here. Sibling wrappers
-		// (databricks-claude, databricks-codex) leave it false.
-		ResponsesRewrite: proxy.ResponsesRewriteSettings{Enabled: true},
 	}
 	if config.GeminiUpstream != "" {
 		cfg.Routes = append(cfg.Routes, proxy.UpstreamRoute{

@@ -45,9 +45,6 @@ type LaunchPlan struct {
 	// Routes are optional path-prefix upstream overrides (opencode's dual
 	// Anthropic+Gemini routing). Nil for claude — byte-identical to no routes.
 	Routes []proxy.UpstreamRoute
-	// ResponsesRewrite gates the OpenAI Responses-API SSE rewriter (opencode).
-	// Zero value for claude — byte-identical to disabled.
-	ResponsesRewrite proxy.ResponsesRewriteSettings
 	// UCMetricsTable / UCLogsTable / UCTracesTable are the Unity Catalog OTEL
 	// table names; empty disables the corresponding signal's UC header.
 	UCMetricsTable string
@@ -128,7 +125,6 @@ func Run(p profile.Profile, plan LaunchPlan, childArgs []string) int {
 		InferenceUpstream: plan.InferenceUpstream,
 		OTELUpstream:      plan.OTELUpstream,
 		Routes:            plan.Routes,
-		ResponsesRewrite:  plan.ResponsesRewrite,
 		UCMetricsTable:    plan.UCMetricsTable,
 		UCLogsTable:       plan.UCLogsTable,
 		UCTracesTable:     plan.UCTracesTable,
