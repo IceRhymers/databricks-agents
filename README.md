@@ -1,29 +1,37 @@
-# databricks-claude
+# databricks-agents
 
-> **Disclaimer:** This is an unofficial, community-built workaround to enable Databricks OAuth SSO authentication with this AI coding tool. It is not supported, endorsed, or recognized by Databricks. Use at your own risk.
+> **Disclaimer:** These are unofficial, community-built tools for using Databricks OAuth SSO with AI coding agents. They are not supported, endorsed, or recognized by Databricks, Anthropic, OpenAI, or the OpenCode project. Use at your own risk.
 
-Transparent proxy wrapper for Claude Code that auto-refreshes Databricks OAuth tokens — so you never manually paste a token again.
+OAuth-aware launchers for Claude Code, OpenAI Codex CLI, and OpenCode, released together with the `databricks-agents` multiplexer. Each launcher runs a local proxy that injects fresh Databricks OAuth tokens into requests to AI Gateway, so you never need to paste a long-lived token into an agent's config.
 
-> This repo also ships **`databricks-codex`** (for the OpenAI Codex CLI) and **`databricks-opencode`** (for the OpenCode CLI), the same idea for other coding CLIs. Both are smaller tools — no Desktop/MDM surface, no daemon — documented in their own [`databricks-codex`](#databricks-codex) and [`databricks-opencode`](#databricks-opencode) sections below. Everything else on this page is about `databricks-claude`.
+| Agent | Direct launcher | Multiplexer command | Tool-specific docs |
+|-------|-----------------|---------------------|--------------------|
+| Claude Code | `databricks-claude` | `databricks-agents claude` | [Setup and reference](#pick-your-setup) |
+| OpenAI Codex CLI | `databricks-codex` | `databricks-agents codex` | [`databricks-codex`](#databricks-codex) |
+| OpenCode | `databricks-opencode` | `databricks-agents opencode` | [`databricks-opencode`](#databricks-opencode) |
+
+The per-tool launchers remain first-class commands. The multiplexer locates and hands off to the matching sibling binary, so both forms behave identically.
 
 ## The Problem
 
-Databricks AI Gateway supports short-lived OAuth tokens. Claude Code only supports a static `ANTHROPIC_AUTH_TOKEN` in `~/.claude/settings.json`. Without this tool, you'd need to configure long-living credentials with PAT tokens.
+Databricks AI Gateway uses short-lived OAuth tokens, while coding agents expect static credentials in their own configuration files. Without these launchers, you would need to keep refreshing those credentials manually or fall back to long-lived PAT tokens.
 
 ## Prerequisites
 
 - [Databricks CLI](https://docs.databricks.com/dev-tools/cli/databricks-cli.html) installed and authenticated (`databricks auth login`)
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed
+- At least one supported agent installed: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenAI Codex CLI](https://github.com/openai/codex), or [OpenCode](https://opencode.ai)
 - A Databricks Model Serving endpoint with [AI Gateway](https://docs.databricks.com/aws/en/ai-gateway/) enabled (currently in public Beta)
 - Go 1.22+ (only required if building from source)
 
 ## Install
 
-Via Homebrew (recommended):
+### Homebrew (macOS/Linux)
+
+Homebrew actively distributes the multiplexer and Claude launcher:
 
 ```
 brew tap IceRhymers/tap
-brew install databricks-claude
+brew install databricks-agents databricks-claude
 ```
 
 ### Via Scoop (Windows)
@@ -33,19 +41,50 @@ scoop bucket add icerhymers https://github.com/IceRhymers/scoop-bucket
 scoop install databricks-claude
 ```
 
-### Direct binary (Windows)
+Scoop currently distributes `databricks-claude`; install the multiplexer and other launchers from a release or from source.
 
-Download the latest release from the [releases page](https://github.com/IceRhymers/databricks-claude/releases), pick `databricks-claude-windows-amd64.exe` (or `arm64`), rename it to `databricks-claude.exe`, and place it somewhere on your `PATH`.
+### Release binaries
+
+Download the binaries you need from the [releases page](https://github.com/IceRhymers/databricks-agents/releases). Assets are named `<binary>-<os>-<arch>` (with `.exe` on Windows). Rename each downloaded asset to its binary name and put it on your `PATH`.
+
+All four binaries are released **lockstep** for darwin, linux, and windows on amd64 and arm64 under one version and changelog.
 
 ### From source
 
+Clone the repo and run `make install` to install all four commands into `$(go env GOPATH)/bin`:
+
 ```bash
-go install github.com/IceRhymers/databricks-agents/cmd/databricks-claude@latest
+git clone https://github.com/IceRhymers/databricks-agents
+cd databricks-agents
+make install
 ```
 
-This module also builds `databricks-codex` (`go install github.com/IceRhymers/databricks-agents/cmd/databricks-codex@latest`) and `databricks-opencode` (`go install github.com/IceRhymers/databricks-agents/cmd/databricks-opencode@latest`) — see [`databricks-codex`](#databricks-codex) and [`databricks-opencode`](#databricks-opencode) below for their own install/usage — plus the [`databricks-agents`](#databricks-agents-multiplexer) multiplexer (`go install github.com/IceRhymers/databricks-agents/cmd/databricks-agents@latest`) that dispatches to all three.
+Or install only the commands you need:
 
-All four binaries are released **lockstep** — a single git tag builds and publishes `databricks-agents`, `databricks-claude`, `databricks-codex`, and `databricks-opencode` for darwin/linux/windows (amd64 + arm64) under one version and one changelog. The [releases page](https://github.com/IceRhymers/databricks-claude/releases) carries every binary as `<name>-<os>-<arch>` assets (e.g. `databricks-agents-darwin-arm64`, `databricks-claude-linux-amd64`, windows are `.exe`). Homebrew and Scoop currently install `databricks-claude` only; grab the other three from the releases page or `go install`.
+```bash
+go install github.com/IceRhymers/databricks-agents/cmd/databricks-agents@latest
+go install github.com/IceRhymers/databricks-agents/cmd/databricks-claude@latest
+go install github.com/IceRhymers/databricks-agents/cmd/databricks-codex@latest
+go install github.com/IceRhymers/databricks-agents/cmd/databricks-opencode@latest
+```
+
+## Multiplexer usage
+
+`databricks-agents` dispatches to the matching per-tool binary. The selected `databricks-<agent>` command must therefore be installed beside the multiplexer or available on your `PATH`.
+
+```bash
+databricks-agents claude [proxy-flags] [-- claude-args]      # == databricks-claude ...
+databricks-agents codex [proxy-flags] [-- codex-args]        # == databricks-codex ...
+databricks-agents opencode [proxy-flags] [-- opencode-args]  # == databricks-opencode ...
+
+databricks-agents list                 # enumerate the registered agents
+databricks-agents completion bash      # nested completion (bash|zsh|fish)
+databricks-agents --version            # multiplexer version
+```
+
+The multiplexer checks for a sibling binary next to itself first, keeping `make install` and shared-bin-directory layouts on matching versions, then falls back to `PATH`. Nested completion delegates into each agent's own command tree for bash and zsh; fish completes agent names.
+
+> It is named `databricks-agents` rather than `databricks` so it never shadows the Databricks CLI that the launchers use for OAuth tokens.
 
 ## Pick Your Setup
 
@@ -136,7 +175,7 @@ Removes only the databricks-claude hook entries. Other hooks in your settings ar
 
 ### One-time setup
 
-1. **Install** `databricks-claude` (Homebrew, `make install`, or `go install`). All install methods drop a `databricks-claude-credential-helper` symlink next to the main binary; that symlink is the path Claude Desktop will invoke.
+1. **Install** `databricks-claude` with Homebrew or `make install`. Both create the `databricks-claude-credential-helper` alias next to the main binary; that alias is the path Claude Desktop invokes. Plain `go install` does not create the alias, so create it manually next to the installed binary before using Desktop integration.
 2. **Authenticate** with the workspace you want Desktop to talk to: `databricks auth login --profile <name>`.
 3. **Generate the desktop config:**
    ```bash
@@ -299,7 +338,7 @@ Why this opinion: it simplifies every code path (no per-user profile guessing), 
 
 ### Signing prerequisite
 
-**Upstream `databricks-claude` ships unsigned.** Signing is the deployer's responsibility — see [issue #54](https://github.com/IceRhymers/databricks-claude/issues/54) for the rationale (notarization and EV-cert infrastructure is cost-prohibitive for a no-revenue OSS project; it is an adopter concern, not an upstream deliverable). For fleet rollout you have three options:
+**Upstream `databricks-claude` ships unsigned.** Signing is the deployer's responsibility — see [issue #54](https://github.com/IceRhymers/databricks-agents/issues/54) for the rationale (notarization and EV-cert infrastructure is cost-prohibitive for a no-revenue OSS project; it is an adopter concern, not an upstream deliverable). For fleet rollout you have three options:
 
 1. **Build and sign yourself (recommended for real fleets).** Fork the repo (or clone and tag a version), build with `make`, sign with your org's Developer ID (macOS) and/or EV cert (Windows), and notarize via `make notarize` — a stub target documented for adopters (see below). Push the signed artifacts via your MDM. For the self-signed `.pkg` + trust-profile route, see [MDM deployment with signed `.pkg`](#mdm-deployment-with-signed-pkg-self-signed).
 2. **Distribute via package manager.** `brew install IceRhymers/tap/databricks-claude` (macOS) and `scoop install databricks-claude` (Windows) strip the quarantine attribute automatically. Good for self-service installs; does not cover MDM-pushed deployments.
@@ -352,7 +391,7 @@ Steps 1–3 are the same as helper-mode (build, sign, and install the binary).
    ```bash
    databricks auth login --host <workspace-url> --profile <fleet-profile>
    ```
-   Auto-bootstrap on first daemon start was considered and rejected — see [issue #166](https://github.com/IceRhymers/databricks-claude/issues/166). With one profile per fleet, a single manual auth command is trivial enough not to warrant the daemon-side complexity.
+   Auto-bootstrap on first daemon start was considered and rejected — see [issue #166](https://github.com/IceRhymers/databricks-agents/issues/166). With one profile per fleet, a single manual auth command is trivial enough not to warrant the daemon-side complexity.
 8. **Verify.** On the endpoint:
    ```bash
    databricks-claude serve status
@@ -1055,45 +1094,11 @@ export DATABRICKS_NO_UPDATE_CHECK=1
 
 Both suppress the startup check and disable the `update` subcommand.
 
-## databricks-agents (multiplexer)
-
-> **Disclaimer:** Same as above — unofficial, community-built, not supported or endorsed by Databricks. Use at your own risk.
-
-`databricks-agents` is the [`ucode`](https://github.com/databricks/ucode)-style multiplexer: one command that dispatches to the three per-tool binaries. `databricks-agents <agent> [args]` behaves **identically** to running `databricks-<agent> [args]` directly (it locates and hands off to that binary), so every subcommand — `config`, `serve`, `hooks`, `completion`, `desktop`, … — works exactly as documented for the underlying tool. The per-tool binaries remain first-class and are unaffected; use whichever entry point you prefer.
-
-> It's named `databricks-agents` (not `databricks`) on purpose: a binary named `databricks` would shadow the Databricks CLI on your `PATH`, which the wrappers shell out to for OAuth tokens.
-
-### Install
-
-```bash
-go install github.com/IceRhymers/databricks-agents/cmd/databricks-agents@latest
-# and the per-tool binaries it dispatches to:
-go install github.com/IceRhymers/databricks-agents/cmd/databricks-claude@latest
-go install github.com/IceRhymers/databricks-agents/cmd/databricks-codex@latest
-go install github.com/IceRhymers/databricks-agents/cmd/databricks-opencode@latest
-```
-
-`databricks-agents` finds each sibling next to its own binary first (so `make install`, Homebrew, and Scoop layouts that share one bin dir always match versions), then falls back to your `PATH`.
-
-### Usage
-
-```bash
-databricks-agents claude [proxy-flags] [-- claude-args]      # == databricks-claude ...
-databricks-agents codex  [proxy-flags] [-- codex-args]       # == databricks-codex ...
-databricks-agents opencode [proxy-flags] [-- opencode-args]  # == databricks-opencode ...
-
-databricks-agents list                 # enumerate the registered agents
-databricks-agents completion bash      # nested completion (bash|zsh|fish)
-databricks-agents --version            # multiplexer version
-```
-
-Nested shell completion delegates into each agent's own tree — `databricks-agents claude serve <TAB>` completes `install`/`uninstall`/`status`, exactly as `databricks-claude serve <TAB>` does (bash and zsh; fish completes agent names).
-
 ## databricks-codex
 
 > **Disclaimer:** Same as above — unofficial, community-built, not supported or endorsed by Databricks or OpenAI. Use at your own risk.
 
-Transparent proxy wrapper for the [OpenAI Codex CLI](https://github.com/openai/codex) that auto-refreshes Databricks OAuth tokens and surgically patches `~/.codex/config.toml` so Codex authenticates through your Databricks AI Gateway. Everything above this section is about `databricks-claude`; `databricks-codex` is a smaller, sibling tool built from the same module (`github.com/IceRhymers/databricks-agents`) and sharing the same underlying proxy engine — but it has **no daemon, no Claude Desktop/MDM surface, no model auto-discovery, and no local web-search fulfilment**. Its config file is TOML (not a settings.json env block), so it's re-patched at the start of every session rather than bootstrapped once.
+Transparent proxy wrapper for the [OpenAI Codex CLI](https://github.com/openai/codex) that auto-refreshes Databricks OAuth tokens and surgically patches `~/.codex/config.toml` so Codex authenticates through your Databricks AI Gateway. It shares the same underlying proxy engine as `databricks-claude`, but has **no daemon, no Claude Desktop/MDM surface, no model auto-discovery, and no local web-search fulfilment**. Its config file is TOML (not a settings.json env block), so it is re-patched at the start of every session rather than bootstrapped once.
 
 ### Prerequisites
 
@@ -1108,7 +1113,7 @@ Transparent proxy wrapper for the [OpenAI Codex CLI](https://github.com/openai/c
 go install github.com/IceRhymers/databricks-agents/cmd/databricks-codex@latest
 ```
 
-Or clone this repo and `make build` (produces `./databricks-codex` alongside `./databricks-claude`; see [Development](#development)).
+Or clone this repo and run `make build` to produce all four commands; see [Development](#development).
 
 ### Quick Start
 
@@ -1224,7 +1229,7 @@ Same mechanism as `databricks-claude` (see [Automatic Update Check](#automatic-u
 
 > **Disclaimer:** Same as above — unofficial, community-built, not supported or endorsed by Databricks or the OpenCode project. Use at your own risk.
 
-Transparent proxy wrapper for the [OpenCode CLI](https://opencode.ai) that auto-refreshes Databricks OAuth tokens and surgically patches `~/.config/opencode/opencode.json` so OpenCode authenticates through your Databricks AI Gateway. Everything above the [`databricks-codex`](#databricks-codex) section is about `databricks-claude`; `databricks-opencode` is another smaller, sibling tool built from the same module (`github.com/IceRhymers/databricks-agents`) and sharing the same underlying proxy engine — but it has **no daemon, no Claude Desktop/MDM surface, no model auto-discovery, and no OTEL telemetry**. Its config file is JSONC (not a settings.json env block), so it's re-patched at the start of every session rather than bootstrapped once. What's distinctly *larger* than codex: it serves **two upstreams off one local proxy port** — Anthropic on the catch-all `/v1` and Gemini Native on the `/v1beta` route.
+Transparent proxy wrapper for the [OpenCode CLI](https://opencode.ai) that auto-refreshes Databricks OAuth tokens and surgically patches `~/.config/opencode/opencode.json` so OpenCode authenticates through your Databricks AI Gateway. It shares the same underlying proxy engine as the other launchers, but has **no daemon, no Claude Desktop/MDM surface, no model auto-discovery, and no OTEL telemetry**. Its config file is JSONC (not a settings.json env block), so it is re-patched at the start of every session rather than bootstrapped once. Unlike Codex, it serves **two upstreams off one local proxy port** — Anthropic on the catch-all `/v1` and Gemini Native on the `/v1beta` route.
 
 ### Prerequisites
 
@@ -1239,7 +1244,7 @@ Transparent proxy wrapper for the [OpenCode CLI](https://opencode.ai) that auto-
 go install github.com/IceRhymers/databricks-agents/cmd/databricks-opencode@latest
 ```
 
-Or clone this repo and `make build` (produces `./databricks-opencode` alongside `./databricks-claude` and `./databricks-codex`; see [Development](#development)).
+Or clone this repo and run `make build` to produce all four commands; see [Development](#development).
 
 ### Quick Start
 
@@ -1342,11 +1347,13 @@ Same mechanism as `databricks-claude` (see [Automatic Update Check](#automatic-u
 ## Development
 
 ```bash
-git clone https://github.com/IceRhymers/databricks-claude
-cd databricks-claude
+git clone https://github.com/IceRhymers/databricks-agents
+cd databricks-agents
 make test
 make build
 ```
+
+`make build` produces `databricks-agents`, `databricks-claude`, `databricks-codex`, and `databricks-opencode`, plus the Claude credential-helper alias.
 
 ## License
 
