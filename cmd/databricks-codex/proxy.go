@@ -14,30 +14,35 @@ type ProxyConfig struct {
 	OTELUpstream      string
 	UCMetricsTable    string
 	UCLogsTable       string
-	TokenProvider     *tokencache.TokenProvider
-	Verbose           bool
-	APIKey            string
-	TLSCertFile       string
-	TLSKeyFile        string
-	ToolName          string // reported by /health endpoint
-	Version           string // reported by /health endpoint
+	// OpenAIModelsUpstream enables the OpenAI-shaped GET /models reroute; set to
+	// the working {host}/ai-gateway/v1/models discovery URL. See
+	// proxy.Config.OpenAIModelsUpstream.
+	OpenAIModelsUpstream string
+	TokenProvider        *tokencache.TokenProvider
+	Verbose              bool
+	APIKey               string
+	TLSCertFile          string
+	TLSKeyFile           string
+	ToolName             string // reported by /health endpoint
+	Version              string // reported by /health endpoint
 }
 
 // NewProxyServer returns an http.Handler that routes requests to the
 // inference upstream (default) and the OTEL upstream (/otel/).
 func NewProxyServer(config *ProxyConfig) (http.Handler, error) {
 	return proxy.NewServer(&proxy.Config{
-		InferenceUpstream: config.InferenceUpstream,
-		OTELUpstream:      config.OTELUpstream,
-		UCMetricsTable:    config.UCMetricsTable,
-		UCLogsTable:       config.UCLogsTable,
-		TokenSource:       config.TokenProvider,
-		Verbose:           config.Verbose,
-		APIKey:            config.APIKey,
-		TLSCertFile:       config.TLSCertFile,
-		TLSKeyFile:        config.TLSKeyFile,
-		ToolName:          config.ToolName,
-		Version:           config.Version,
+		InferenceUpstream:    config.InferenceUpstream,
+		OTELUpstream:         config.OTELUpstream,
+		UCMetricsTable:       config.UCMetricsTable,
+		UCLogsTable:          config.UCLogsTable,
+		OpenAIModelsUpstream: config.OpenAIModelsUpstream,
+		TokenSource:          config.TokenProvider,
+		Verbose:              config.Verbose,
+		APIKey:               config.APIKey,
+		TLSCertFile:          config.TLSCertFile,
+		TLSKeyFile:           config.TLSKeyFile,
+		ToolName:             config.ToolName,
+		Version:              config.Version,
 	})
 }
 

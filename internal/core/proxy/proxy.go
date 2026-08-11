@@ -72,7 +72,20 @@ type Config struct {
 	// enhanced telemetry beta). When empty the X-Databricks-UC-Table-Name
 	// header is omitted for /v1/traces requests.
 	UCTracesTable string
-	TokenSource   TokenSource
+	// OpenAIModelsUpstream, when non-empty, enables an OpenAI-shaped model
+	// discovery route at GET /models. It must be the full URL of the working
+	// Databricks discovery endpoint ({host}/ai-gateway/v1/models). The proxy
+	// fetches it with a fresh token and transforms the Databricks-shaped list
+	// into the OpenAI /v1/models shape ({id, object:"model", ...}) that
+	// OpenAI-shaped clients (e.g. JetBrains IntelliJ) expect.
+	//
+	// This exists because OpenAI-shaped launchers forward to the
+	// {host}/ai-gateway/openai/v1 base path, and Databricks has no
+	// /ai-gateway/openai/v1/models endpoint — a naive forward of GET /models
+	// 400s. Leave empty (claude, opencode) for byte-identical behavior: the
+	// route is not registered and GET /models falls through to the catch-all.
+	OpenAIModelsUpstream string
+	TokenSource          TokenSource
 	Verbose       bool
 	// ToolName identifies the launcher that owns this proxy (e.g.
 	// "databricks-claude"). It serves two roles: it names the tool in /health
@@ -463,6 +476,15 @@ func NewServer(config *Config) (http.Handler, error) {
 	}
 
 	mux.Handle("/otel/", recoveryHandler(otelProxy, lg))
+
+	// Optional OpenAI-shaped model discovery. Registered at the exact path
+	// "/models" (http.ServeMux exact match — /models/{id} is NOT caught here)
+	// only when the launcher opted in via OpenAIModelsUpstream. Off by default:
+	// claude and opencode leave the field empty, so GET /models falls through to
+	// the inference catch-all exactly as before. See modelsRerouteHandler.
+	if config.OpenAIModelsUpstream != "" {
+		mux.Handle("/models", recoveryHandler(modelsRerouteHandler(config.OpenAIModelsUpstream, config, inferenceHandlerHTTP), lg))
+	}
 
 	// Daemon mode: explicitly reject /shutdown with 404 so it does not fall
 	// through to the inference catch-all (which would forward POST /shutdown

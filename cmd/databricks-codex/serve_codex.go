@@ -260,17 +260,18 @@ func runServeSession(a *Args) {
 		fmt.Fprintln(os.Stderr, "databricks-codex: proxy API key authentication enabled")
 	}
 	proxyHandler, err := NewProxyServer(&ProxyConfig{
-		InferenceUpstream: gatewayURL,
-		OTELUpstream:      otelUpstream,
-		UCMetricsTable:    otelMetricsTable,
-		UCLogsTable:       otelLogsTable,
-		TokenProvider:     tp,
-		Verbose:           a.Verbose,
-		APIKey:            a.ProxyAPIKey,
-		TLSCertFile:       a.TLSCert,
-		TLSKeyFile:        a.TLSKey,
-		ToolName:          "databricks-codex",
-		Version:           Version,
+		InferenceUpstream:    gatewayURL,
+		OTELUpstream:         otelUpstream,
+		UCMetricsTable:       otelMetricsTable,
+		UCLogsTable:          otelLogsTable,
+		OpenAIModelsUpstream: ConstructModelsURL(host),
+		TokenProvider:        tp,
+		Verbose:              a.Verbose,
+		APIKey:               a.ProxyAPIKey,
+		TLSCertFile:          a.TLSCert,
+		TLSKeyFile:           a.TLSKey,
+		ToolName:             "databricks-codex",
+		Version:              Version,
 	})
 	if err != nil {
 		log.Fatalf("databricks-codex: failed to create proxy: %v", err)

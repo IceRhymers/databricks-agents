@@ -50,6 +50,11 @@ type LaunchPlan struct {
 	UCMetricsTable string
 	UCLogsTable    string
 	UCTracesTable  string
+	// OpenAIModelsUpstream, when non-empty, enables the OpenAI-shaped GET /models
+	// discovery reroute in the proxy (OpenAI-shaped launchers only, e.g. codex).
+	// Empty for claude/opencode — byte-identical to no reroute. See
+	// proxy.Config.OpenAIModelsUpstream.
+	OpenAIModelsUpstream string
 	// TokenProvider mints fresh upstream bearer tokens. Built by the launcher
 	// (claude shells the Databricks CLI); Run only hands it to the proxy.
 	TokenProvider proxy.TokenSource
@@ -125,10 +130,11 @@ func Run(p profile.Profile, plan LaunchPlan, childArgs []string) int {
 		InferenceUpstream: plan.InferenceUpstream,
 		OTELUpstream:      plan.OTELUpstream,
 		Routes:            plan.Routes,
-		UCMetricsTable:    plan.UCMetricsTable,
-		UCLogsTable:       plan.UCLogsTable,
-		UCTracesTable:     plan.UCTracesTable,
-		TokenSource:       plan.TokenProvider,
+		UCMetricsTable:       plan.UCMetricsTable,
+		UCLogsTable:          plan.UCLogsTable,
+		UCTracesTable:        plan.UCTracesTable,
+		OpenAIModelsUpstream: plan.OpenAIModelsUpstream,
+		TokenSource:          plan.TokenProvider,
 		Verbose:           plan.Verbose,
 		APIKey:            plan.ProxyAPIKey,
 		// TLS is applied at serve time via srv.ServeTLS with the raw cert/key
