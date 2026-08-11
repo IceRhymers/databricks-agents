@@ -181,12 +181,13 @@ func buildCodexLaunchPlan(a *Args) (core.LaunchPlan, codexSettingsPatcher, error
 	patcher = newCodexPatcher(model, modelExplicit, otelMetricsTable, otelLogsTable, otel)
 
 	plan = core.LaunchPlan{
-		InferenceUpstream: gatewayURL,
-		OTELUpstream:      otelUpstream,
-		UCMetricsTable:    otelMetricsTable,
-		UCLogsTable:       otelLogsTable,
-		UCTracesTable:     "",
-		TokenProvider:     tp,
+		InferenceUpstream:    gatewayURL,
+		OTELUpstream:         otelUpstream,
+		UCMetricsTable:       otelMetricsTable,
+		UCLogsTable:          otelLogsTable,
+		UCTracesTable:        "",
+		OpenAIModelsUpstream: ConstructModelsURL(host),
+		TokenProvider:        tp,
 		Port:              port,
 		PortFlag:          a.PortFlag,
 		ProfileName:       profile,
