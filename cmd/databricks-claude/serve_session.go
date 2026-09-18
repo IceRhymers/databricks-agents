@@ -271,8 +271,8 @@ func runServeSession(args []string) {
 
 	log.Printf("databricks-claude: serve --session-mode: proxy on %s (owner=%v), profile=%s, upstream=%s",
 		proxyURL, isOwner, resolvedProfile, inferenceUpstream)
-	log.Printf("databricks-claude: serve --session-mode: with-websearch=%t idle-timeout=%s",
-		cfg.WebSearch.Enabled, f.idleTimeout)
+	log.Printf("databricks-claude: serve --session-mode: with-websearch=%t with-advisor=%t idle-timeout=%s",
+		cfg.WebSearch.Enabled, cfg.Advisor.Enabled, f.idleTimeout)
 
 	runServeSessionLoop(proxyURL, ln, isOwner, refcountPath, doneCh)
 }

@@ -111,6 +111,15 @@ func buildServeProxyConfig(st persistentState, r serveResolved, mode serveMode) 
 		}
 	}
 
+	// --with-advisor: the proxy-fulfilled server-side advisor tool. No
+	// backend to build, so nothing can fail-soft here — the settings are
+	// read straight from state.
+	if st.WithAdvisor {
+		fmt.Fprintln(os.Stderr, "databricks-claude: --with-advisor is enabled. The proxy fulfills Anthropic's")
+		fmt.Fprintln(os.Stderr, "  server-side advisor tool locally via a sub-inference.")
+		fmt.Fprintln(os.Stderr, "  Advisor sub-inferences are billed as independent requests.")
+	}
+
 	cfg := &proxy.Config{
 		InferenceUpstream: r.inferenceUpstream,
 		OTELUpstream:      r.otelUpstream,
@@ -127,6 +136,11 @@ func buildServeProxyConfig(st persistentState, r serveResolved, mode serveMode) 
 			Backend:     wsBackendImpl,
 			Robots:      wsRobots,
 			FetchBudget: wsBudget,
+		},
+		Advisor: proxy.AdvisorSettings{
+			Enabled:          st.WithAdvisor,
+			DefaultModel:     st.AdvisorModel,
+			DefaultMaxTokens: st.AdvisorMaxTokens,
 		},
 	}
 
@@ -513,6 +527,7 @@ func runServe(args []string) {
 		log.Printf("databricks-claude: serve: otel-traces-table=%s", tracesTable)
 	}
 	log.Printf("databricks-claude: serve: with-websearch=%t", cfg.WebSearch.Enabled)
+	log.Printf("databricks-claude: serve: with-advisor=%t", cfg.Advisor.Enabled)
 
 	// Block until SIGINT or SIGTERM.
 	sigCh := make(chan os.Signal, 1)

@@ -95,6 +95,11 @@ type Config struct {
 	// inference requests are forwarded byte-identically and this struct
 	// has no effect — see pkg/proxy/websearch_handler.go.
 	WebSearch WebSearchSettings
+	// Advisor (--with-advisor) bundles the optional server-side advisor tool
+	// settings. When Enabled is false, advisor_* tools are stripped from
+	// forwarded requests and inference is forwarded byte-identically — see
+	// internal/core/proxy/advisor.go.
+	Advisor AdvisorSettings
 	// Daemon, when true, indicates this proxy is running as a long-lived daemon
 	// (databricks-claude serve). The /health response includes daemon-specific
 	// fields; /shutdown is not registered (serve.go never wraps with lifecycle).

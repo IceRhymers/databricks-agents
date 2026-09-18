@@ -35,6 +35,17 @@ type persistentState struct {
 	WithWebSearch        bool   `json:"with_websearch,omitempty"`
 	WebSearchBackend     string `json:"websearch_backend,omitempty"`
 	WebSearchFetchBudget int    `json:"websearch_fetch_budget,omitempty"`
+	// --with-advisor — the server-side advisor tool. The proxy intercepts
+	// advisor_* tool declarations, converts them to plain function tools for
+	// the upstream, and runs the advisor sub-inference itself. Persisted so
+	// the user only opts in once.
+	//
+	// AdvisorModel empty means "same model as the executor request"; the
+	// per-tool `model` field on the declaration still overrides both.
+	// AdvisorMaxTokens empty falls back to 2048, floored at 1024.
+	WithAdvisor      bool   `json:"with_advisor,omitempty"`
+	AdvisorModel     string `json:"advisor_model,omitempty"`
+	AdvisorMaxTokens int    `json:"advisor_max_tokens,omitempty"`
 	// Models holds the resolved model FQN per family, written by the
 	// discovery-time config writer and read by the launch path. A nil pointer
 	// means discovery has never run; the launch path then falls back to

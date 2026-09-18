@@ -72,6 +72,31 @@ func inferenceHandler(upstream *url.URL, config *Config, ws WebSearchSettings) h
 			}
 		}
 
+		// --- Advisor request-side rewrite ---
+		// Runs on every /v1/messages request (independent of websearch):
+		// replay expansion, auto-injection, advisor tool → function tool
+		// conversion, constraint capture. When the feature is disabled and
+		// the request declares no advisor tool this is a cheap no-op and the
+		// body bytes are untouched.
+		var advisorPrep advisorRequestPrep
+		if isMessagesPath(r.URL.Path) && len(bodyBytes) > 0 {
+			if mutated, prep, ok := tryRewriteAdvisorRequest(bodyBytes, config.Advisor, lg); ok {
+				bodyBytes = mutated
+				advisorPrep = prep
+			}
+		}
+		// Advisor + websearch streaming together is a documented limitation:
+		// such requests are DOWNGRADED to non-streaming and go through the
+		// server loop (spec §5, §8).
+		downgradedFromStream := false
+		if advisorPrep.constraints.any() && rewroteTools.Any() && advisorPrep.clientWantsStream {
+			if forced, ok := forceNonStreaming(bodyBytes); ok {
+				bodyBytes = forced
+				downgradedFromStream = true
+				lg.Logf("advisor: advisor+websearch streaming unsupported; downgrading to non-streaming server loop")
+			}
+		}
+
 		// Build outbound request.
 		token, terr := config.TokenSource.Token(r.Context())
 		if terr != nil {
@@ -118,6 +143,74 @@ func inferenceHandler(upstream *url.URL, config *Config, ws WebSearchSettings) h
 			return
 		}
 		defer resp.Body.Close()
+
+		// --- ADVISOR RESPONSE DISPATCH (spec §5) ---
+		// Runs before the websearch passthrough fast path so advisor
+		// interception wins when both are in play (websearch has already
+		// been downgraded to non-streaming above in that case).
+		if advisorPrep.constraints.any() && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			lc := &advisorLoopContext{
+				upstream:    upstream,
+				tokenSource: config.TokenSource,
+				toolName:    config.ToolName,
+				verbose:     config.Verbose,
+				settings:    config.Advisor,
+				constraints: advisorPrep.constraints,
+				executorReq: advisorPrep.request,
+				usesByTool:  map[string]int{},
+			}
+			// Streaming interleave: advisor present, websearch absent (or
+			// downgraded), client asked for stream.
+			if advisorPrep.clientWantsStream && !downgradedFromStream && isSSEResponse(resp) {
+				for k, vv := range resp.Header {
+					if isHopByHop(k) {
+						continue
+					}
+					for _, v := range vv {
+						w.Header().Add(k, v)
+					}
+				}
+				w.Header().Del("Content-Length")
+				w.WriteHeader(resp.StatusCode)
+				// The interleave takes over reading + closing the upstream
+				// body. The outer `defer resp.Body.Close()` above is a method
+				// value whose receiver was captured at defer time, so it also
+				// closes this same body — a second Close on an HTTP response
+				// body is a documented no-op, so the double-close is safe and
+				// we deliberately do not try to disarm it.
+				if err := handleAdvisorStreamingInterleave(r.Context(), w, resp.Body, lc, transport); err != nil {
+					lg.Vlogf("advisor: streaming interleave err: %v", err)
+				}
+				return
+			}
+
+			// Server loop: non-streaming (or downgraded) JSON response.
+			if isJSONResponse(resp) {
+				const maxRespBytes = 8 * 1024 * 1024
+				first, rerr := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes+1))
+				if rerr != nil {
+					http.Error(w, "read upstream JSON failed", http.StatusBadGateway)
+					return
+				}
+				out, lerr := runAdvisorServerLoop(r.Context(), lc, first, transport)
+				if lerr != nil || len(out) == 0 {
+					lg.Vlogf("advisor: server loop err: %v (forwarding original)", lerr)
+					out = first
+				}
+				for k, vv := range resp.Header {
+					if isHopByHop(k) {
+						continue
+					}
+					for _, v := range vv {
+						w.Header().Add(k, v)
+					}
+				}
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(out)))
+				w.WriteHeader(resp.StatusCode)
+				_, _ = w.Write(out)
+				return
+			}
+		}
 
 		// PASSTHROUGH FAST PATH (also load-bearing for byte-identity):
 		// If the request rewrite did not touch any web_search_*/web_fetch_*

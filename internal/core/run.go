@@ -56,6 +56,9 @@ type LaunchPlan struct {
 	// WebSearch bundles the optional local web_search/web_fetch fulfillment.
 	// Disabled (zero value) is byte-identical to no websearch.
 	WebSearch proxy.WebSearchSettings
+	// Advisor bundles the optional server-side advisor tool settings.
+	// Disabled (zero value) is byte-identical to no advisor.
+	Advisor proxy.AdvisorSettings
 	// Port is the resolved bind port (post --port / state / default chain).
 	Port int
 	// PortFlag is the raw --port value (0 if absent); forwarded to Patch so the
@@ -138,6 +141,7 @@ func Run(p profile.Profile, plan LaunchPlan, childArgs []string) int {
 		ToolName:  plan.ToolName,
 		Version:   plan.Version,
 		WebSearch: plan.WebSearch,
+		Advisor:   plan.Advisor,
 	})
 	if err != nil {
 		log.Fatalf("%s: %v", plan.ToolName, err)

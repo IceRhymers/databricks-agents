@@ -37,6 +37,8 @@ func runConfigCommand(args []string) {
 		runConfigOTEL(args[1:])
 	case "websearch":
 		runConfigWebSearch(args[1:])
+	case "advisor":
+		runConfigAdvisor(args[1:])
 	case "write":
 		runConfigWrite(args[1:])
 	case "show":
@@ -57,16 +59,16 @@ func runConfigCommand(args []string) {
 // drive it in isolation. Caller is responsible for the post-resolve
 // settings.json write.
 type configOTELResolution struct {
-	Profile        string
-	Port           int
-	ProxyURL       string
-	MetricsTable   string
-	LogsTable      string
-	TracesTable    string
-	OTELEnv        map[string]string // keys to write into settings.json env block
-	NewState       persistentState   // state to persist (callers gate the write on a mutated check)
-	StateMutated   bool              // true when NewState differs from the input saved state
-	TracesEnabled  bool              // mirrors --traces flag (for log lines / future use)
+	Profile       string
+	Port          int
+	ProxyURL      string
+	MetricsTable  string
+	LogsTable     string
+	TracesTable   string
+	OTELEnv       map[string]string // keys to write into settings.json env block
+	NewState      persistentState   // state to persist (callers gate the write on a mutated check)
+	StateMutated  bool              // true when NewState differs from the input saved state
+	TracesEnabled bool              // mirrors --traces flag (for log lines / future use)
 }
 
 // resolveConfigOTEL performs the OTEL enable-side resolution that the legacy
@@ -466,6 +468,146 @@ func runConfigWebSearchDisable(args []string) {
 		}
 	}
 	fmt.Fprintln(os.Stderr, "databricks-claude: websearch disabled (state file with_websearch=false; backend/fetch-budget cleared)")
+}
+
+// configAdvisorResolution is the pure-function projection of the advisor
+// enable/disable resolution. Mirrors configWebSearchResolution shape.
+type configAdvisorResolution struct {
+	NewState     persistentState
+	StateMutated bool
+}
+
+// resolveConfigAdvisor performs the advisor enable/disable resolution.
+// Pure function. Storage: state file only — the advisor is a proxy-side
+// feature with no settings.json key (the proxy reads with_advisor from state
+// on next start).
+//
+// `enable` semantics: with_advisor=true; flag values override state; missing
+// flags inherit existing state (NOT defaults — the proxy applies its own
+// fallbacks when state is empty: model = executor's model, max_tokens = 2048
+// floored at 1024).
+// `disable` semantics: with_advisor=false AND clear model/max-tokens so a
+// future enable re-applies the proxy defaults. Mirrors
+// resolveConfigWebSearch's clear-on-disable contract.
+func resolveConfigAdvisor(
+	saved persistentState,
+	enable bool,
+	modelFlag string, modelSet bool,
+	maxTokensFlag int, maxTokensSet bool,
+) configAdvisorResolution {
+	r := configAdvisorResolution{NewState: saved}
+
+	if !enable {
+		mutated := false
+		if r.NewState.WithAdvisor {
+			r.NewState.WithAdvisor = false
+			mutated = true
+		}
+		if r.NewState.AdvisorModel != "" {
+			r.NewState.AdvisorModel = ""
+			mutated = true
+		}
+		if r.NewState.AdvisorMaxTokens != 0 {
+			r.NewState.AdvisorMaxTokens = 0
+			mutated = true
+		}
+		r.StateMutated = mutated
+		return r
+	}
+
+	mutated := false
+	if !r.NewState.WithAdvisor {
+		r.NewState.WithAdvisor = true
+		mutated = true
+	}
+	if modelSet && r.NewState.AdvisorModel != modelFlag {
+		r.NewState.AdvisorModel = modelFlag
+		mutated = true
+	}
+	if maxTokensSet && r.NewState.AdvisorMaxTokens != maxTokensFlag {
+		r.NewState.AdvisorMaxTokens = maxTokensFlag
+		mutated = true
+	}
+	r.StateMutated = mutated
+	return r
+}
+
+// runConfigAdvisor implements `databricks-claude config advisor <enable|disable>`.
+func runConfigAdvisor(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "databricks-claude: 'config advisor' requires a subcommand: enable or disable")
+		_ = cmd.Render(os.Stderr, *configCommand.Subcommand("advisor"), nil)
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "enable":
+		runConfigAdvisorEnable(args[1:])
+	case "disable":
+		runConfigAdvisorDisable(args[1:])
+	case "--help", "-h", "help":
+		_ = cmd.Render(os.Stdout, *configCommand.Subcommand("advisor"), nil)
+		os.Exit(0)
+	default:
+		fmt.Fprintf(os.Stderr, "databricks-claude: unknown config advisor subcommand %q\n\n", args[0])
+		_ = cmd.Render(os.Stderr, *configCommand.Subcommand("advisor"), nil)
+		os.Exit(1)
+	}
+}
+
+func runConfigAdvisorEnable(args []string) {
+	node := configCommand.Subcommand("advisor").Subcommand("enable")
+	r, _ := node.Parse(args)
+	if r.Bools["help"] {
+		_ = cmd.Render(os.Stdout, *node, nil)
+		os.Exit(0)
+	}
+
+	saved := loadState()
+	maxTokensFlag, maxTokensSet := 0, false
+	if r.Set["max-tokens"] {
+		raw := r.Strings["max-tokens"]
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			log.Fatalf("databricks-claude: config advisor enable: --max-tokens: %q is not an integer", raw)
+		}
+		maxTokensFlag = n
+		maxTokensSet = true
+	}
+
+	res := resolveConfigAdvisor(saved, true, r.Strings["model"], r.Set["model"], maxTokensFlag, maxTokensSet)
+	if res.StateMutated {
+		if err := saveState(res.NewState); err != nil {
+			log.Fatalf("databricks-claude: config advisor enable: could not persist advisor state: %v", err)
+		}
+	}
+
+	model := res.NewState.AdvisorModel
+	if model == "" {
+		model = "(same as executor request)"
+	}
+	maxTokens := res.NewState.AdvisorMaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 2048
+	}
+	fmt.Fprintf(os.Stderr, "databricks-claude: advisor enabled (model=%s, max-tokens=%d). The proxy will fulfill the advisor server-side tool on its next start.\n", model, maxTokens)
+}
+
+func runConfigAdvisorDisable(args []string) {
+	node := configCommand.Subcommand("advisor").Subcommand("disable")
+	r, _ := node.Parse(args)
+	if r.Bools["help"] {
+		_ = cmd.Render(os.Stdout, *node, nil)
+		os.Exit(0)
+	}
+
+	saved := loadState()
+	res := resolveConfigAdvisor(saved, false, "", false, 0, false)
+	if res.StateMutated {
+		if err := saveState(res.NewState); err != nil {
+			log.Fatalf("databricks-claude: config advisor disable: could not persist advisor state: %v", err)
+		}
+	}
+	fmt.Fprintln(os.Stderr, "databricks-claude: advisor disabled (state file with_advisor=false; model/max-tokens cleared)")
 }
 
 // runConfigWrite implements `databricks-claude config write` — the legacy

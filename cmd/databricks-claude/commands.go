@@ -678,7 +678,7 @@ Examples:
 // --profile on its own Flags slice.
 var configCommand = cmd.Command{
 	Name:  "config",
-	Short: "Persistent config editor (otel, websearch, write, show)",
+	Short: "Persistent config editor (otel, websearch, advisor, write, show)",
 	Long:  configHelpTemplate,
 	Subcommands: []cmd.Command{
 		{
@@ -739,6 +739,31 @@ var configCommand = cmd.Command{
 			},
 		},
 		{
+			Name:  "advisor",
+			Short: "Toggle the server-side advisor tool (enable|disable)",
+			Long:  configAdvisorHelpTemplate,
+			Subcommands: []cmd.Command{
+				{
+					Name:  "enable",
+					Short: "Enable the advisor server-side tool — saved to state file",
+					Long:  configAdvisorEnableHelpTemplate,
+					Flags: []cmd.FlagDef{
+						{Name: "model", Description: "Advisor model (default: same model as the executor request)", TakesArg: true, StateKey: "advisor_model"},
+						{Name: "max-tokens", Description: "Advisor output cap (default 2048, floored at 1024)", TakesArg: true, StateKey: "advisor_max_tokens", Default: "2048"},
+						{Name: "help", Short: "h", Description: "Show help message"},
+					},
+				},
+				{
+					Name:  "disable",
+					Short: "Disable the advisor server-side tool — clears state file keys",
+					Long:  configAdvisorDisableHelpTemplate,
+					Flags: []cmd.FlagDef{
+						{Name: "help", Short: "h", Description: "Show help message"},
+					},
+				},
+			},
+		},
+		{
 			Name:  "write",
 			Short: "Write first-run settings.json env block (was --write-claude-config)",
 			Long:  configWriteHelpTemplate,
@@ -785,6 +810,9 @@ Subcommands:
   websearch enable [flags]  Enable local web_search/web_fetch fulfillment
                             (workaround for FMAPI gap). State file only.
   websearch disable         Clear websearch state-file keys.
+  advisor enable [flags]    Enable the server-side advisor tool (mid-turn
+                            consultation of a second model). State file only.
+  advisor disable           Clear advisor state-file keys.
   write [flags]             Write the full first-run settings.json env block
                             (proxy URL, model routing, custom headers,
                             optional OTEL keys). Idempotent.
@@ -807,6 +835,12 @@ Examples:
 
   # Turn on local websearch workaround:
   databricks-claude config websearch enable --backend duckduckgo
+
+  # Turn on the server-side advisor tool:
+  databricks-claude config advisor enable
+
+  # Point the advisor at a stronger model:
+  databricks-claude config advisor enable --model databricks-claude-opus-4-7
 
   # First-run settings.json bootstrap:
   databricks-claude config write --profile my-workspace
@@ -932,6 +966,71 @@ Clear with_websearch from the state file (sets it to false). Backend +
 fetch-budget keys are also cleared so a future 'config websearch enable'
 re-applies the defaults. New behaviour vs. the legacy CLI (which had no
 explicit websearch disable flag).
+
+Flags:
+  --help, -h   Show this help message
+`
+
+const configAdvisorHelpTemplate = `Usage: databricks-claude config advisor <enable|disable> [flags]
+
+Toggle the server-side advisor tool. The advisor lets a running agent pause
+mid-turn and consult a second model for strategic guidance.
+
+Anthropic executes server-side tools on their own infrastructure, but only
+for Anthropic-hosted models. This proxy implements the same client-facing
+contract against Databricks FMAPI: advisor_* tool declarations are rewritten
+into plain function tools for the upstream, and the proxy runs the advisor
+sub-inference itself — applying its own routing, logging, and cost controls.
+
+The advisor is a proxy-side feature controlled entirely by the state file
+(~/.claude/.databricks-claude.json); there is no settings.json key.
+
+Advisor sub-inferences are billed as independent requests. The parent
+request's usage is NOT inflated.
+
+Subcommands:
+  enable    Set with_advisor=true (see 'config advisor enable --help').
+  disable   Set with_advisor=false (clears related state keys).
+`
+
+const configAdvisorEnableHelpTemplate = `Usage: databricks-claude config advisor enable [flags]
+
+Persist with_advisor=true to the state file so the proxy fulfills the
+advisor server-side tool on its next start.
+
+When enabled, the proxy also AUTO-INJECTS an advisor tool declaration into
+any request that already declares at least one tool. Requests with no tools
+are untouched — the advisor is scoped to agentic workloads.
+
+Per-tool 'model' and 'max_tokens' fields on the client's advisor declaration
+override the values set here. max_tokens is floored at 1024.
+
+Flags:
+  --model VALUE        Advisor model. Default: the same model as the
+                       executor request that invoked the advisor.
+  --max-tokens N       Advisor output cap. Default 2048, floored at 1024.
+  --help, -h           Show this help message
+
+Examples:
+  # Enable with the executor's own model as the advisor:
+  databricks-claude config advisor enable
+
+  # Point the advisor at a stronger model:
+  databricks-claude config advisor enable --model databricks-claude-opus-4-7
+
+  # Give the advisor more room to reason:
+  databricks-claude config advisor enable --max-tokens 4096
+`
+
+const configAdvisorDisableHelpTemplate = `Usage: databricks-claude config advisor disable
+
+Clear with_advisor from the state file (sets it to false). Model +
+max-tokens keys are also cleared so a future 'config advisor enable'
+re-applies the defaults.
+
+With the advisor disabled, any advisor_* tool a client declares is STRIPPED
+from the request forwarded upstream — the upstream must never see a server
+tool the proxy does not intend to fulfill.
 
 Flags:
   --help, -h   Show this help message

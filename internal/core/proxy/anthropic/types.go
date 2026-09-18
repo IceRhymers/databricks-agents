@@ -97,6 +97,20 @@ func IsWebSearchTool(toolJSON []byte) bool { return hasTypePrefix(toolJSON, "web
 // IsWebFetchTool returns true if the type field has the prefix "web_fetch_".
 func IsWebFetchTool(toolJSON []byte) bool { return hasTypePrefix(toolJSON, "web_fetch_") }
 
+// IsAdvisorTool returns true if the type field has the prefix "advisor_".
+// Matches any dated version (advisor_20260301, etc.) without code changes.
+func IsAdvisorTool(toolJSON []byte) bool { return hasTypePrefix(toolJSON, "advisor_") }
+
+// AdvisorToolVersion is the injected advisor tool version when auto-injecting.
+const AdvisorToolVersion = "advisor_20260301"
+
+// AdvisorToolName is the canonical function-tool name the advisor rewrites to.
+const AdvisorToolName = "advisor"
+
+// AdvisorDescription is the upstream-facing description on the converted
+// function tool. Tells the executor model the advisor takes no parameters.
+const AdvisorDescription = "Consult a higher-intelligence advisor model for strategic guidance. Takes no parameters."
+
 func hasTypePrefix(toolJSON []byte, prefix string) bool {
 	var probe struct {
 		Type string `json:"type"`
@@ -346,4 +360,131 @@ func ParseWebFetchInput(jsonBytes []byte) (string, error) {
 		return "", err
 	}
 	return in.URL, nil
+}
+
+// ConvertAdvisorTool returns the canonical function-tool replacement for any
+// advisor_* server tool. The upstream sees a plain tool with an empty schema;
+// the proxy intercepts invocations by name and runs the sub-inference itself.
+func ConvertAdvisorTool() []byte {
+	const tmpl = `{
+  "name": "advisor",
+  "description": "Consult a higher-intelligence advisor model for strategic guidance. Takes no parameters.",
+  "input_schema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}`
+	return compactJSON([]byte(tmpl))
+}
+
+// AdvisorConstraints carries the proxy-enforced fields lifted out of an
+// advisor_* tool declaration. Never sent upstream.
+type AdvisorConstraints struct {
+	// MaxUses caps invocations per request across loop turns. 0 = uncapped.
+	MaxUses int
+	// Model overrides the advisor model. Empty = use configured default.
+	Model string
+	// MaxTokens caps advisor output. 0 = use default (2048, floored at 1024).
+	MaxTokens int
+	// MaxTokensSet records whether the client explicitly set max_tokens; the
+	// stop_reason field is only surfaced in the success content when true.
+	MaxTokensSet bool
+}
+
+// ParseAdvisorConstraints extracts max_uses / model / max_tokens from an
+// advisor_* tool JSON blob. Absent fields leave zero values.
+func ParseAdvisorConstraints(toolJSON []byte) AdvisorConstraints {
+	var probe struct {
+		MaxUses   int    `json:"max_uses"`
+		Model     string `json:"model"`
+		MaxTokens *int   `json:"max_tokens"`
+	}
+	_ = json.Unmarshal(toolJSON, &probe)
+	out := AdvisorConstraints{MaxUses: probe.MaxUses, Model: probe.Model}
+	if probe.MaxTokens != nil {
+		out.MaxTokens = *probe.MaxTokens
+		out.MaxTokensSet = true
+	}
+	return out
+}
+
+// BuildAdvisorServerToolUseBlock returns a server_tool_use content block for
+// the client-facing advisor call. Input is always {} — the advisor takes no
+// parameters. id should already carry the srvtoolu_ prefix.
+func BuildAdvisorServerToolUseBlock(id string) ([]byte, error) {
+	out := map[string]any{
+		"type":  "server_tool_use",
+		"id":    id,
+		"name":  AdvisorToolName,
+		"input": map[string]any{},
+	}
+	return json.Marshal(out)
+}
+
+// BuildAdvisorSuccessBlock returns an advisor_tool_result content block
+// carrying the advisor's guidance text. stopReason is included only when
+// non-empty — the spec mirrors Anthropic's behavior of surfacing truncation
+// only when the client imposed an explicit max_tokens cap.
+func BuildAdvisorSuccessBlock(toolUseID, text, stopReason string) ([]byte, error) {
+	content := map[string]any{
+		"type": "advisor_result",
+		"text": text,
+	}
+	if stopReason != "" {
+		content["stop_reason"] = stopReason
+	}
+	out := map[string]any{
+		"type":        "advisor_tool_result",
+		"tool_use_id": toolUseID,
+		"content":     content,
+	}
+	return json.Marshal(out)
+}
+
+// BuildAdvisorErrorBlock returns an advisor_tool_result content block in the
+// error shape. errorCode is one of: too_many_requests, overloaded,
+// prompt_too_long, execution_time_exceeded, unavailable, max_uses_exceeded.
+func BuildAdvisorErrorBlock(toolUseID, errorCode string) ([]byte, error) {
+	out := map[string]any{
+		"type":        "advisor_tool_result",
+		"tool_use_id": toolUseID,
+		"content": map[string]string{
+			"type":       "advisor_tool_result_error",
+			"error_code": errorCode,
+		},
+	}
+	return json.Marshal(out)
+}
+
+// ExtractAdvisorResultText pulls the guidance text out of a replayed
+// advisor_tool_result block's content. Success shape returns text verbatim;
+// error shape returns "[Advisor unavailable: <error_code>]". Unparseable or
+// absent content returns "[Advisor unavailable]".
+func ExtractAdvisorResultText(blockJSON []byte) string {
+	var probe struct {
+		Type    string          `json:"type"`
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(blockJSON, &probe); err != nil || probe.Type != "advisor_tool_result" {
+		return "[Advisor unavailable]"
+	}
+	var content struct {
+		Type      string `json:"type"`
+		Text      string `json:"text"`
+		ErrorCode string `json:"error_code"`
+	}
+	if err := json.Unmarshal(probe.Content, &content); err != nil {
+		return "[Advisor unavailable]"
+	}
+	if content.Type == "advisor_tool_result_error" {
+		if content.ErrorCode != "" {
+			return "[Advisor unavailable: " + content.ErrorCode + "]"
+		}
+		return "[Advisor unavailable]"
+	}
+	if content.Text != "" {
+		return content.Text
+	}
+	return "[Advisor unavailable]"
 }

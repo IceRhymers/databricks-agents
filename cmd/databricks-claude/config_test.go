@@ -71,6 +71,32 @@ func TestConfigWebSearchDisableParity(t *testing.T) {
 	assertFlagSetEqual(t, "config websearch disable", *disable, []string{"help"})
 }
 
+func TestConfigAdvisorEnableParity(t *testing.T) {
+	adv := configCommand.Subcommand("advisor")
+	if adv == nil {
+		t.Fatal("configCommand should have an `advisor` subcommand")
+	}
+	enable := adv.Subcommand("enable")
+	if enable == nil {
+		t.Fatal("config advisor should have an `enable` subcommand")
+	}
+	assertFlagSetEqual(t, "config advisor enable", *enable, []string{
+		"model", "max-tokens", "help",
+	})
+}
+
+func TestConfigAdvisorDisableParity(t *testing.T) {
+	adv := configCommand.Subcommand("advisor")
+	if adv == nil {
+		t.Fatal("configCommand should have an `advisor` subcommand")
+	}
+	disable := adv.Subcommand("disable")
+	if disable == nil {
+		t.Fatal("config advisor should have a `disable` subcommand")
+	}
+	assertFlagSetEqual(t, "config advisor disable", *disable, []string{"help"})
+}
+
 func TestConfigWriteParity(t *testing.T) {
 	write := configCommand.Subcommand("write")
 	if write == nil {
@@ -97,7 +123,7 @@ func TestConfigShowParity(t *testing.T) {
 // TestServeHasNestedSubcommands (#171). Drives the AC: "Help + completion
 // derived from the tree".
 func TestConfigHasNestedSubcommands(t *testing.T) {
-	want := []string{"otel", "websearch", "write", "show"}
+	want := []string{"otel", "websearch", "advisor", "write", "show"}
 	got := make(map[string]bool, len(configCommand.Subcommands))
 	for _, s := range configCommand.Subcommands {
 		got[s.Name] = true
@@ -135,7 +161,7 @@ func TestConfigCompletionExposed(t *testing.T) {
 	if configSub == nil {
 		t.Fatal("rootCommand.CompletionSubcommands() missing `config`")
 	}
-	for _, want := range []string{"otel", "websearch", "write", "show"} {
+	for _, want := range []string{"otel", "websearch", "advisor", "write", "show"} {
 		found := false
 		for _, k := range configSub.kids {
 			if k == want {
@@ -186,17 +212,17 @@ func TestResolveConfigOTEL_OrchestrationMatrix(t *testing.T) {
 	}
 
 	cases := []struct {
-		name             string
-		saved            persistentState
-		metricsFlag      string
-		metricsSet       bool
-		logsFlag         string
-		logsSet          bool
-		tracesBool       bool
-		tracesTableFlag  string
-		tracesTableSet   bool
-		applyDefault     bool
-		want             wantTuple
+		name            string
+		saved           persistentState
+		metricsFlag     string
+		metricsSet      bool
+		logsFlag        string
+		logsSet         bool
+		tracesBool      bool
+		tracesTableFlag string
+		tracesTableSet  bool
+		applyDefault    bool
+		want            wantTuple
 	}{
 		{
 			name:         "empty state, no flags, applyDefault=true → applies legacy metrics default + derives logs",
@@ -664,6 +690,7 @@ func TestConfigCommand_Help(t *testing.T) {
 	for _, want := range []string{
 		"otel enable", "otel disable",
 		"websearch enable", "websearch disable",
+		"advisor enable", "advisor disable",
 		"write", "show",
 	} {
 		if !strings.Contains(out, want) {
@@ -678,4 +705,123 @@ func TestConfigCommand_Help(t *testing.T) {
 func renderConfigForTest(sb *strings.Builder) error {
 	sb.WriteString(configCommand.Long)
 	return nil
+}
+
+// --- advisor resolver tests ---
+
+func TestResolveConfigAdvisor_EnableEmptyState(t *testing.T) {
+	res := resolveConfigAdvisor(persistentState{}, true, "", false, 0, false)
+	if !res.NewState.WithAdvisor {
+		t.Error("expected WithAdvisor=true after enable on empty state")
+	}
+	if !res.StateMutated {
+		t.Error("expected StateMutated=true")
+	}
+	// Model/max-tokens stay empty so the proxy applies its own defaults
+	// (executor's model, 2048 floored at 1024).
+	if res.NewState.AdvisorModel != "" {
+		t.Errorf("AdvisorModel should stay empty, got %q", res.NewState.AdvisorModel)
+	}
+	if res.NewState.AdvisorMaxTokens != 0 {
+		t.Errorf("AdvisorMaxTokens should stay 0, got %d", res.NewState.AdvisorMaxTokens)
+	}
+}
+
+func TestResolveConfigAdvisor_EnableAlreadyEnabledIsNoOp(t *testing.T) {
+	res := resolveConfigAdvisor(persistentState{WithAdvisor: true}, true, "", false, 0, false)
+	if !res.NewState.WithAdvisor {
+		t.Error("expected WithAdvisor to stay true")
+	}
+	if res.StateMutated {
+		t.Error("expected StateMutated=false when nothing changed")
+	}
+}
+
+func TestResolveConfigAdvisor_EnableWithFlagOverrides(t *testing.T) {
+	saved := persistentState{WithAdvisor: true, AdvisorModel: "old-m", AdvisorMaxTokens: 2048}
+	res := resolveConfigAdvisor(saved, true, "new-m", true, 4096, true)
+	if res.NewState.AdvisorModel != "new-m" {
+		t.Errorf("AdvisorModel: got %q, want new-m", res.NewState.AdvisorModel)
+	}
+	if res.NewState.AdvisorMaxTokens != 4096 {
+		t.Errorf("AdvisorMaxTokens: got %d, want 4096", res.NewState.AdvisorMaxTokens)
+	}
+	if !res.StateMutated {
+		t.Error("expected StateMutated=true")
+	}
+}
+
+func TestResolveConfigAdvisor_EnablePreservesStateWhenFlagsAbsent(t *testing.T) {
+	saved := persistentState{WithAdvisor: true, AdvisorModel: "keep-m", AdvisorMaxTokens: 3000}
+	res := resolveConfigAdvisor(saved, true, "", false, 0, false)
+	if res.NewState.AdvisorModel != "keep-m" {
+		t.Errorf("AdvisorModel should be preserved, got %q", res.NewState.AdvisorModel)
+	}
+	if res.NewState.AdvisorMaxTokens != 3000 {
+		t.Errorf("AdvisorMaxTokens should be preserved, got %d", res.NewState.AdvisorMaxTokens)
+	}
+	if res.StateMutated {
+		t.Error("expected StateMutated=false when nothing changed")
+	}
+}
+
+// TestResolveConfigAdvisor_Disable_ClearsAllRelatedKeys mirrors the
+// websearch clear-on-disable contract: a future enable must re-apply the
+// proxy defaults rather than inherit stale values.
+func TestResolveConfigAdvisor_Disable_ClearsAllRelatedKeys(t *testing.T) {
+	saved := persistentState{
+		WithAdvisor:      true,
+		AdvisorModel:     "some-model",
+		AdvisorMaxTokens: 4096,
+	}
+	res := resolveConfigAdvisor(saved, false, "", false, 0, false)
+	if res.NewState.WithAdvisor {
+		t.Error("expected WithAdvisor=false after disable")
+	}
+	if res.NewState.AdvisorModel != "" {
+		t.Errorf("AdvisorModel should be cleared on disable, got %q", res.NewState.AdvisorModel)
+	}
+	if res.NewState.AdvisorMaxTokens != 0 {
+		t.Errorf("AdvisorMaxTokens should be cleared on disable, got %d", res.NewState.AdvisorMaxTokens)
+	}
+	if !res.StateMutated {
+		t.Error("expected StateMutated=true")
+	}
+}
+
+func TestResolveConfigAdvisor_DisableNoOp(t *testing.T) {
+	res := resolveConfigAdvisor(persistentState{}, false, "", false, 0, false)
+	if res.StateMutated {
+		t.Error("expected StateMutated=false disabling an already-disabled advisor")
+	}
+}
+
+// TestResolveConfigAdvisor_DisablePreservesUnrelatedKeys guards against the
+// disable path clobbering websearch / OTEL / profile state.
+func TestResolveConfigAdvisor_DisablePreservesUnrelatedKeys(t *testing.T) {
+	saved := persistentState{
+		Profile:          "myprofile",
+		Port:             49155,
+		WithAdvisor:      true,
+		AdvisorModel:     "m",
+		WithWebSearch:    true,
+		WebSearchBackend: "duckduckgo",
+		OtelMetricsTable: "cat.schema.metrics",
+	}
+	res := resolveConfigAdvisor(saved, false, "", false, 0, false)
+	if res.NewState.Profile != "myprofile" {
+		t.Errorf("Profile was clobbered: %q", res.NewState.Profile)
+	}
+	if res.NewState.Port != 49155 {
+		t.Errorf("Port was clobbered: %d", res.NewState.Port)
+	}
+	if !res.NewState.WithWebSearch {
+		t.Error("WithWebSearch was clobbered")
+	}
+	if res.NewState.WebSearchBackend != "duckduckgo" {
+		t.Errorf("WebSearchBackend was clobbered: %q", res.NewState.WebSearchBackend)
+	}
+	if res.NewState.OtelMetricsTable != "cat.schema.metrics" {
+		t.Errorf("OtelMetricsTable was clobbered: %q", res.NewState.OtelMetricsTable)
+	}
 }

@@ -249,6 +249,25 @@ func buildClaudeLaunchPlan(a *Args) (core.LaunchPlan, error) {
 		wsRobots = &websearch.Robots{}
 	}
 
+	// --- Read --with-advisor settings from state ---
+	// The advisor is a proxy-fulfilled server-side tool: advisor_* tool
+	// declarations are converted to plain function tools for the upstream and
+	// the proxy runs the advisor sub-inference itself. AdvisorModel empty
+	// means "same model as the executor request".
+	withAdvisor := wsState.WithAdvisor
+	advisorModel := wsState.AdvisorModel
+	advisorMaxTokens := wsState.AdvisorMaxTokens
+	if withAdvisor {
+		fmt.Fprintln(os.Stderr, "databricks-claude: --with-advisor is enabled. The proxy fulfills Anthropic's")
+		fmt.Fprintln(os.Stderr, "  server-side advisor tool locally by running a sub-inference against the")
+		if advisorModel != "" {
+			fmt.Fprintf(os.Stderr, "  advisor model %q.\n", advisorModel)
+		} else {
+			fmt.Fprintln(os.Stderr, "  same model as the executor request (override per-tool or via config).")
+		}
+		fmt.Fprintln(os.Stderr, "  Advisor sub-inferences are billed as independent requests.")
+	}
+
 	// --- BuildEnv: the proxyURL-dependent settings env block. Reproduces the
 	// original inline OTEL emission (table-presence semantics) + the Databricks
 	// full-setup keys. Invoked by core.Run after the port binds. All CLAUDE_*/
@@ -304,6 +323,11 @@ func buildClaudeLaunchPlan(a *Args) (core.LaunchPlan, error) {
 			Backend:     wsBackendImpl,
 			Robots:      wsRobots,
 			FetchBudget: wsBudget,
+		},
+		Advisor: proxy.AdvisorSettings{
+			Enabled:          withAdvisor,
+			DefaultModel:     advisorModel,
+			DefaultMaxTokens: advisorMaxTokens,
 		},
 		Port:           port,
 		PortFlag:       a.Port,

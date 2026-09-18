@@ -3,7 +3,7 @@
 # databricks-agents
 
 ## Purpose
-Monorepo of transparent proxy wrappers that auto-refresh Databricks OAuth tokens via the Databricks CLI, intercepting each wrapped tool's API calls, injecting fresh workspace tokens per-request, and optionally routing OpenTelemetry metrics/logs through the Databricks OTEL endpoint. Three per-tool launchers today: `databricks-claude` (wraps Claude Code), `databricks-codex` (wraps the OpenAI Codex CLI, folded in via #201), and `databricks-opencode` (wraps the OpenCode CLI, folded in via #202), plus the `databricks-agents` multiplexer (`ucode`-style dispatcher, #203) that runs `databricks-agents <claude|codex|opencode> ...` by exec-ing the matching per-tool binary. Zero external Go dependencies -- pure stdlib only.
+Monorepo of transparent proxy wrappers that auto-refresh Databricks OAuth tokens via the Databricks CLI, intercepting each wrapped tool's API calls, injecting fresh workspace tokens per-request, optionally routing OpenTelemetry metrics/logs through the Databricks OTEL endpoint, and optionally fulfilling Anthropic **server-side tools** (`web_search`/`web_fetch`, `advisor`) that Databricks FMAPI does not natively support. Three per-tool launchers today: `databricks-claude` (wraps Claude Code), `databricks-codex` (wraps the OpenAI Codex CLI, folded in via #201), and `databricks-opencode` (wraps the OpenCode CLI, folded in via #202), plus the `databricks-agents` multiplexer (`ucode`-style dispatcher, #203) that runs `databricks-agents <claude|codex|opencode> ...` by exec-ing the matching per-tool binary. Zero external Go dependencies -- pure stdlib only.
 
 ## Key Files (`cmd/databricks-claude/`)
 
@@ -12,15 +12,15 @@ Monorepo of transparent proxy wrappers that auto-refresh Databricks OAuth tokens
 | File | Description |
 |------|-------------|
 | `main.go` | Thin CLI entry point (#200): subcommand dispatch (completion/update/serve/desktop/setup/config/hooks/doctor + credential-helper alias), `parseArgs`, help/version, then `buildClaudeLaunchPlan(a)` → `core.Run(ClaudeProfile(), plan, a.ClaudeArgs)`. Retains shared package-`main` helpers (`envBlock`, `parseArgs`, `handleHelp`, `defaultModelRouting`, `launchModelRouting`, `databricksFullSetupEnv`, `buildUpdaterConfig`, `handlePrintEnv`). No proxy/port/refcount/child logic remains here. |
-| `launch_claude.go` | `buildClaudeLaunchPlan(a *Args) (core.LaunchPlan, error)` (#200): all claude-specific wrapper pre-flight — logging setup, settings.json read, profile resolution, auth (browser-login fallback, MUST precede token seed), startup security warnings, upstream/OTEL discovery, token seeding, port resolution, settings→state OTEL-table migration, TLS validation, websearch backend — plus the proxyURL-dependent `BuildEnv` closure (OTEL/`CLAUDE_*` env emission). Returns a neutral `core.LaunchPlan` for `core.Run`. |
+| `launch_claude.go` | `buildClaudeLaunchPlan(a *Args) (core.LaunchPlan, error)` (#200): all claude-specific wrapper pre-flight — logging setup, settings.json read, profile resolution, auth (browser-login fallback, MUST precede token seed), startup security warnings, upstream/OTEL discovery, token seeding, port resolution, settings→state OTEL-table migration, TLS validation, websearch backend — advisor settings — plus the proxyURL-dependent `BuildEnv` closure (OTEL/`CLAUDE_*` env emission). Returns a neutral `core.LaunchPlan` for `core.Run`. |
 | `proxy.go` | Thin facade over `internal/core/proxy` (`ProxyConfig`, `NewProxyServer`, `StartProxy`, `recoveryHandler`). After #200 the launch path calls `proxy.NewServer` directly inside `core.Run`; this facade is retained for `proxy_test.go` cmd-level coverage. |
 | `token.go` | Facade over `internal/core/tokencache`: implements `databricksFetcher` (shells out to `databricks auth token`), host discovery via `databricks auth env`, and AI Gateway URL construction (`{host}/ai-gateway/anthropic`). Consumed by `buildClaudeLaunchPlan` (stays claude-side; a future issue may promote it into `internal/core`). |
 | `process.go` | Wraps `internal/core/childproc`: `ForwardSignals`. (`RunChild` removed in #200 — the launch path now calls `childproc.Run` directly inside `core.Run` with `BinaryName` from `profile.ChildBinary` and the managed marker from `LaunchPlan.ManagedEnvVar`.) |
-| `state.go` | `persistentState` struct for `~/.claude/.databricks-claude.json` (profile, port, CLI path, OTEL table names) plus `loadState`/`saveState`/`resolvePort` — thin facades over `internal/core/state` (#216) |
+| `state.go` | `persistentState` struct for `~/.claude/.databricks-claude.json` (profile, port, CLI path, OTEL table names, websearch + advisor settings) plus `loadState`/`saveState`/`resolvePort` — thin facades over `internal/core/state` (#216) |
 | `hooks.go` | Session hook install/uninstall: `installHooks`, `uninstallHooks` |
 | `ensureconfig.go` | Bootstrap helpers for first-run settings patching |
 | `commands.go` | Source-of-truth `rootCommand` declaration plus `desktopCommand` / `setupCommand` / `configCommand` / `serveCommand` tree nodes (drives parsing, help, completion) |
-| `config.go` | `config` subcommand runner: dispatches `config otel enable\|disable`, `config websearch enable\|disable`, `config write`, `config show`. Pure resolvers `resolveConfigOTEL` / `resolveConfigWebSearch` for testability. `config write` is a discovery-time writer: runs `pkg/modeldiscovery.Discover` and persists the resolved `ModelSet` into state. |
+| `config.go` | `config` subcommand runner: dispatches `config otel enable\|disable`, `config websearch enable\|disable`, `config advisor enable\|disable`, `config write`, `config show`. Pure resolvers `resolveConfigOTEL` / `resolveConfigWebSearch` / `resolveConfigAdvisor` for testability. `config write` is a discovery-time writer: runs `pkg/modeldiscovery.Discover` and persists the resolved `ModelSet` into state. |
 | `doctor.go` | `doctor` subcommand: non-interactive diff of settings.json model pins vs. `pkg/modeldiscovery.Discover` output (`diffModelRouting`, pure/testable). Read-only by default; `--fix` persists the discovered models to state and rewrites settings.json through `bootstrapSettings`. |
 | `completion_flags.go` | `flagDefs` slice shared by shell completion and flag parsing |
 | `databrickscfg.go` | Reads `~/.databrickscfg` section headers for profile completion |
@@ -36,7 +36,7 @@ Monorepo of transparent proxy wrappers that auto-refresh Databricks OAuth tokens
 | `serve_install_other.go` | Stub returning "unsupported platform" for non-darwin/linux/windows (build tag: `!darwin && !windows && !linux`) |
 | `desktop_config_test.go` | Tests for `buildMobileconfig`, `buildRegFile`, `buildDevModeJSON`, `writeDesktopConfigByPath`, `guardDevJSONOutputPath`, `writeFileAtomic`, install-instruction routing, and model-list consistency across all three artifacts |
 | `main_test.go` | Tests for `parseArgs`, `handleHelp`, `handlePrintEnv`, `deriveLogsTable`, `databricksFullSetupEnv`, `config write` bootstrap, `/shutdown` + idle-timeout lifecycle, and command-tree/completion parity |
-| `config_test.go` | Tests for `config` subcommand parity, OTEL orchestration matrix, websearch resolver, state-preservation invariant on `config otel disable` |
+| `config_test.go` | Tests for `config` subcommand parity, OTEL orchestration matrix, websearch + advisor resolvers, state-preservation invariants on `config otel disable` / `config advisor disable` |
 | `doctor_test.go` | Tests for `diffModelRouting`'s status matrix (ok/drift/stale-legacy/unresolved/new) |
 | `process_test.go` | Tests for `ForwardSignals` signal forwarding and child exit-code propagation |
 | `proxy_test.go` | Tests for inference and OTEL proxy routing, token injection, panic recovery |
@@ -113,7 +113,7 @@ The `databricks-agents` multiplexer (`main` package, #203) — the `ucode`-style
 | `cmd/databricks-codex/` | CLI entry point (`main` package) for the codex launcher, folded in via #201. Builds the `databricks-codex` binary. See the Key Files table above. |
 | `cmd/databricks-opencode/` | CLI entry point (`main` package) for the opencode launcher, folded in via #202. Builds the `databricks-opencode` binary. See the Key Files table above. |
 | `internal/cmd/` | Pre-existing command-tree parsing/help/completion library (shared by all three launchers' `commands.go`) |
-| `internal/core/` | The shared tool-agnostic engine (proxy, tokencache, authcheck, childproc, state, headless, lifecycle, portbind, health, refcount, updater, completion, cli). Promoted from `pkg/` in #198; module-private (see `internal/core/doc.go`). `run.go` (#200) adds `LaunchPlan` + `Run(profile.Profile, LaunchPlan, []string) int` — the wrapper-mode launch engine (bind → serve/watch → BuildEnv → Patch → child → refcount teardown) shared by both launchers. |
+| `internal/core/` | The shared tool-agnostic engine (proxy — including the websearch + advisor server-side tools, tokencache, authcheck, childproc, state, headless, lifecycle, portbind, health, refcount, updater, completion, cli). Promoted from `pkg/` in #198; module-private (see `internal/core/doc.go`). `run.go` (#200) adds `LaunchPlan` + `Run(profile.Profile, LaunchPlan, []string) int` — the wrapper-mode launch engine (bind → serve/watch → BuildEnv → Patch → child → refcount teardown) shared by both launchers. |
 | `internal/codex/` | codex-specific libraries -- the `internal/`-tree analog of `pkg/` for codex, since it must be importable from `cmd/databricks-codex` (see `internal/codex/AGENTS.md`) |
 | `internal/codex/tomlconfig/` | codex-specific string-based surgical patcher for `~/.codex/config.toml` (see `internal/codex/tomlconfig/AGENTS.md`). Not tool-agnostic, so it lives outside `internal/core`; not promoted to `pkg/` since only `cmd/databricks-codex` imports it. |
 | `internal/opencode/` | opencode-specific libraries -- the `internal/`-tree analog of `pkg/` for opencode, since it must be importable from `cmd/databricks-opencode` (see `internal/opencode/AGENTS.md`) |
@@ -148,12 +148,13 @@ The `databricks-agents` multiplexer (`main` package, #203) — the `ucode`-style
 - **Never break settings.json / config.toml restore** -- a botched restore leaves the user's config pointing at a dead proxy
 - **OTEL key persistence** -- claude: when `otelKeysPersistent` is true, Restore must skip OTEL keys. codex: `OtelMetricsDisabled`/`OtelLogsDisabled` sticky bits in state let `config otel disable` suppress export while preserving table-name preferences for a future re-enable
 - **Session handoff** -- when multiple instances of the same launcher run concurrently, the exiting session hands the base URL to the most recent survivor
+- **Server-side tools must fail open** -- the `--with-websearch` and `--with-advisor` interception paths must never fail the client's outer request when local fulfillment fails. Emit an error-shaped `*_tool_result` block (and, for the advisor, an `[Advisor unavailable: <code>]` continuation `tool_result`) so the model can work around it. See `internal/core/proxy/AGENTS.md` for the full advisor invariants — especially the "`tool_use` must be immediately followed by its `tool_result`" rule and the thinking-block stripping requirement, which are the two most common sources of upstream 400s
 
 ## Dependencies
 
 - `internal/core/authcheck` -- pre-flight auth verification
 - `internal/core/childproc` -- child process management
-- `internal/core/proxy` -- HTTP/WebSocket reverse proxy, API key auth, TLS, security checks, log sanitization
+- `internal/core/proxy` -- HTTP/WebSocket reverse proxy, API key auth, TLS, security checks, log sanitization, and the two server-side tool implementations (websearch local fulfillment; advisor sub-inference + continuation loop)
 - `internal/core/tokencache` -- generic token caching
 - `internal/core/{state,headless,lifecycle,portbind,health,refcount,updater,completion,cli}` -- the rest of the shared engine
 - `internal/cmd` -- command-tree parsing/help/completion library
